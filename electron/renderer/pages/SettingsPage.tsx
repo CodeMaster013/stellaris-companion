@@ -343,18 +343,30 @@ function SettingsPage({ onReportIssue, onThemeChange }: SettingsPageProps) {
                         <div className="space-y-4 pt-2">
                              {/* Provider Selection */}
                              <HUDSelect
-                               label="AI PROVIDER"
-                               value={llmProvider}
-                               onChange={(e) => {
-                                 const newProvider = normalizeLLMProvider(e.target.value)
-                                 setLlmProvider(newProvider)
-                                 // Auto-fill default base URL for local providers
-                                 if (DEFAULT_BASE_URLS[newProvider] && !llmBaseUrl) {
-                                   setLlmBaseUrl(DEFAULT_BASE_URLS[newProvider] || '')
-                                 }
-                               }}
-                               options={LLM_PROVIDER_OPTIONS}
-                             />
+                                label="AI PROVIDER"
+                                value={llmProvider}
+                                onChange={(e) => {
+                                  const newProvider = normalizeLLMProvider(e.target.value)
+                                  const oldProvider = llmProvider
+                                  setLlmProvider(newProvider)
+                                  
+                                  // Auto-fill default base URL for local providers
+                                  // Update if: switching TO a local provider AND either:
+                                  // - base URL is empty, OR
+                                  // - base URL matches the OLD provider's default (user didn't customize it)
+                                  const isLocalProvider = !!DEFAULT_BASE_URLS[newProvider]
+                                  const oldProviderDefault = DEFAULT_BASE_URLS[oldProvider]
+                                  const isBaseUrlDefault = !llmBaseUrl || llmBaseUrl === oldProviderDefault
+                                  
+                                  if (isLocalProvider && isBaseUrlDefault) {
+                                    setLlmBaseUrl(DEFAULT_BASE_URLS[newProvider] || '')
+                                  } else if (!isLocalProvider) {
+                                    // Clear base URL when switching to cloud providers
+                                    setLlmBaseUrl('')
+                                  }
+                                }}
+                                options={LLM_PROVIDER_OPTIONS}
+                              />
                              
                              {/* API Key for cloud providers */}
                              {PROVIDER_API_KEY_MAP[llmProvider] === 'google' && (

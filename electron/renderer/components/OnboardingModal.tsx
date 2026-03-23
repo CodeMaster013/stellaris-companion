@@ -324,10 +324,22 @@ export default function OnboardingModal({ onComplete }: OnboardingModalProps) {
                 <StepApiKey
                   llmProvider={llmProvider}
                   onProviderChange={(p) => {
+                    const oldProvider = llmProvider
                     setLlmProvider(p)
+                    
                     // Auto-fill default base URL for local providers
-                    if (DEFAULT_BASE_URLS[p] && !llmBaseUrl) {
+                    // Update if: switching TO a local provider AND either:
+                    // - base URL is empty, OR
+                    // - base URL matches the OLD provider's default (user didn't customize it)
+                    const isLocalProvider = !!DEFAULT_BASE_URLS[p]
+                    const oldProviderDefault = DEFAULT_BASE_URLS[oldProvider]
+                    const isBaseUrlDefault = !llmBaseUrl || llmBaseUrl === oldProviderDefault
+                    
+                    if (isLocalProvider && isBaseUrlDefault) {
                       setLlmBaseUrl(DEFAULT_BASE_URLS[p] || '')
+                    } else if (!isLocalProvider) {
+                      // Clear base URL when switching to cloud providers
+                      setLlmBaseUrl('')
                     }
                   }}
                   googleApiKey={googleApiKey}
