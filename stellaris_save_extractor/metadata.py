@@ -15,6 +15,7 @@ KNOWN_MAJOR_DLCS = {
     "Overlord",
     "First Contact",
     "The Machine Age",
+    "Nomads",
     # Story Packs
     "Leviathans",
     "Synthetic Dawn",

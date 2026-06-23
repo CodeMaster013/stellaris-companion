@@ -78,6 +78,29 @@ def test_apply_precomputed_briefing_uses_metadata_for_dlc_prompt_context(compani
     assert "Nemesis (MISSING" in companion.system_prompt
 
 
+def test_apply_precomputed_briefing_lists_nomads_unavailable_features(companion):
+    metadata = {
+        "version": "Pegasus v4.4.3",
+        "required_dlcs": ["Utopia"],
+        "missing_dlcs": ["Nomads"],
+    }
+    briefing_json = json.dumps({"meta": {"date": "2400.01.01", "version": "Pegasus v4.4.3"}})
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2400.01.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata=metadata,
+    )
+
+    assert "Nomads (MISSING" in companion.system_prompt
+    assert "unavailable: Nomadic Empires and Arkships" in companion.system_prompt
+    assert "Waystations and Waylines" in companion.system_prompt
+    assert "Operational Reserves" in companion.system_prompt
+
+
 def test_build_game_context_prefers_metadata_missing_dlcs_without_extractor(companion):
     companion.metadata = {
         "version": "Corvus v4.2.4",

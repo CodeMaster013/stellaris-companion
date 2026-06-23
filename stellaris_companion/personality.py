@@ -206,6 +206,13 @@ _DLC_KEY_FEATURES: dict[str, str] = {
         "Dyson Swarm, Arc Furnace, "
         "Origins (Cybernetic Creed, Synthetic Fertility)"
     ),
+    "Nomads": (
+        "Nomadic Empires and Arkships, Waystations and Waylines, "
+        "Contracts with settled empires, Operational Reserves, "
+        "Origins (Voidfarers, Heirs of the Khan, The Sacred Path, Forever Cruise), "
+        "Defender of the Galaxy ambition/Hero Ships, Stellar Cannon, "
+        "Champion's Forge Live!, Nomadic Paragons, nomadic civics and traditions"
+    ),
     # Story Packs
     "Leviathans": (
         "Guardians (Ether Drake, Enigmatic Fortress, Dimensional Horror, "

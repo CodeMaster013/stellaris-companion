@@ -44,6 +44,18 @@ def test_load_patch_notes_prefers_snapshot_and_appends_newer_deltas(patch_dirs):
     assert "legacy-4-2" not in result
 
 
+def test_load_patch_notes_appends_44_delta_after_43_snapshot(patch_dirs):
+    patches_dir, snapshots_dir = patch_dirs
+    _write_patch(patches_dir / "4.3.md", "stale-4-3-delta")
+    _write_patch(patches_dir / "4.4.md", "stable-pegasus-delta")
+    _write_patch(snapshots_dir / "4.3.md", "compiled-through-4-3")
+
+    result = personality.load_patch_notes("Pegasus v4.4.3", cumulative=True)
+
+    assert result == "compiled-through-4-3\n\nstable-pegasus-delta"
+    assert "stale-4-3-delta" not in result
+
+
 def test_load_patch_notes_handles_two_digit_minor_versions(patch_dirs):
     patches_dir, _ = patch_dirs
     _write_patch(patches_dir / "4.9.md", "delta-4-9")
