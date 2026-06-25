@@ -56,6 +56,16 @@ def test_load_patch_notes_appends_44_delta_after_43_snapshot(patch_dirs):
     assert "stale-4-3-delta" not in result
 
 
+def test_bundled_44_patch_includes_stable_444_nomad_facts():
+    raw_resource = (personality.PATCHES_DIR / "4.4.md").read_text(encoding="utf-8")
+    result = personality.load_patch_notes("Pegasus v4.4.4", cumulative=False)
+
+    assert "open-beta-only" not in raw_resource
+    assert "Arkships have inherent 40% habitability" in result
+    assert "strategic-resource mining technology grants +50% harvesting yield" in result
+    assert "Stellar Ignition Contracts are completable" in result
+
+
 def test_load_patch_notes_handles_two_digit_minor_versions(patch_dirs):
     patches_dir, _ = patch_dirs
     _write_patch(patches_dir / "4.9.md", "delta-4-9")
