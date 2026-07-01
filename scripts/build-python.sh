@@ -31,8 +31,8 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
-# Check if PyInstaller is installed
-if ! command -v pyinstaller &> /dev/null; then
+# Check if PyInstaller is installed in the selected Python environment.
+if ! "$PYTHON_BIN" -m PyInstaller --version &> /dev/null; then
     echo "PyInstaller not found. Installing..."
     "$PYTHON_BIN" -m pip install pyinstaller
 fi
@@ -47,7 +47,7 @@ find backend stellaris_companion stellaris_save_extractor -type f -name '*.pyc' 
 
 # Run PyInstaller with the spec file
 echo "Running PyInstaller..."
-pyinstaller --clean stellaris-backend.spec
+"$PYTHON_BIN" -m PyInstaller --clean stellaris-backend.spec
 
 # Move output to dist-python (expected by electron-builder)
 echo "Moving output to dist-python..."

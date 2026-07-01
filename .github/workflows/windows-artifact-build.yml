@@ -39,8 +39,14 @@ jobs:
       - name: Install Python dependencies
         shell: bash
         run: |
-          pip install .
-          pip install pyinstaller
+          python -m venv .venv-build
+          PYTHON_BIN="$PWD/.venv-build/Scripts/python.exe"
+          VENV_BIN="$PWD/.venv-build/Scripts"
+          "$PYTHON_BIN" -m pip install --upgrade pip
+          "$PYTHON_BIN" -m pip install .
+          "$PYTHON_BIN" -m pip install pyinstaller
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
 
       - name: Build Python backend
         shell: bash

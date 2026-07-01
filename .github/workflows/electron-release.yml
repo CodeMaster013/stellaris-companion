@@ -88,9 +88,21 @@ jobs:
           cache-dependency-path: 'pyproject.toml'
 
       - name: Install Python Dependencies
+        shell: bash
         run: |
-          pip install .
-          pip install pyinstaller
+          python -m venv .venv-build
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PYTHON_BIN="$PWD/.venv-build/Scripts/python.exe"
+            VENV_BIN="$PWD/.venv-build/Scripts"
+          else
+            PYTHON_BIN="$PWD/.venv-build/bin/python"
+            VENV_BIN="$PWD/.venv-build/bin"
+          fi
+          "$PYTHON_BIN" -m pip install --upgrade pip
+          "$PYTHON_BIN" -m pip install .
+          "$PYTHON_BIN" -m pip install pyinstaller
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
 
       - name: Build Python Backend
         shell: bash

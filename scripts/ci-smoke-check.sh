@@ -42,6 +42,7 @@ else
 fi
 
 "${PYTHON_BIN}" scripts/smoke_mcp_stdio.py "${BACKEND_EXE}" || die "bundled backend did not pass MCP stdio smoke test"
+"${PYTHON_BIN}" scripts/smoke_electron_backend_boot.py "${BACKEND_EXE}" || die "bundled backend did not pass Electron boot smoke test"
 
 # Claude Desktop MCPB extension package
 if ! find "electron/dist/mcpb" -type f -name "stellaris-companion-mcp-relay-*.mcpb" -print -quit | grep -q .; then

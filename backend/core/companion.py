@@ -24,8 +24,16 @@ if str(PROJECT_ROOT) not in sys.path:
 try:
     from google import genai
     from google.genai import types
-except ImportError:
-    raise ImportError("google-genai package not installed. Run: pip install google-genai")
+except ModuleNotFoundError as exc:
+    if (
+        "No module named" in str(exc)
+        and exc.name
+        and (exc.name == "google" or exc.name.startswith("google.genai"))
+    ):
+        raise ImportError(
+            "google-genai package not installed. Run: pip install google-genai"
+        ) from exc
+    raise
 
 from backend.core.conversation import ConversationManager
 from backend.core.json_utils import json_dumps
