@@ -1,1 +1,2 @@
 - Added Advisor support for Stellaris: Nomads and Pegasus 4.4 mechanics, including Arkships, Waystations, Waylines, contracts, and Operational Reserves.
+- Fixed an issue that could leave the app stuck scanning empire data.
