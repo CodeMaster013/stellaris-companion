@@ -1,5 +1,1 @@
-- Added MCP Relay so Claude Desktop and other local AI apps can use your latest campaign context for Advisor briefings.
-- Draft, revise, and save Chronicle chapters back into Stellaris Companion when you are ready.
-- Standard quota now routes Advisor chat through Gemini Flash-Lite, giving free-tier users up to 25x more daily Advisor requests under current Gemini limits.
-- Added interface language support for German, Spanish, French, Japanese, Portuguese, and Simplified Chinese.
-- Updated Stellaris 4.3 guidance and fixed in-app issue reporting for release builds.
+- Added Advisor support for Stellaris: Nomads and Pegasus 4.4 mechanics, including Arkships, Waystations, Waylines, contracts, and Operational Reserves.
