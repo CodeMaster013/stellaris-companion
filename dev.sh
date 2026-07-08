@@ -53,11 +53,13 @@ cleanup_orphans
 # Start Python backend in background (use venv if available)
 echo "📦 Starting Python backend on :8742..."
 if [ -f "venv/bin/python3" ]; then
-  venv/bin/python3 -m backend.electron_main &
+  PYTHON="venv/bin/python3"
+elif [ -f "venv/Scripts/python.exe" ]; then
+  PYTHON="venv/Scripts/python.exe"
 else
-  python3 -m backend.electron_main &
+  PYTHON="${PYTHON:-python3}"
 fi
-PYTHON_PID=$!
+"$PYTHON" -m backend.electron_main &
 
 # Wait for backend to be ready
 echo "⏳ Waiting for backend..."

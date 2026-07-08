@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:electron\"",
     "dev:renderer": "cd renderer && npm run dev",
-    "dev:electron": "NODE_ENV=development electron .",
+    "dev:electron": "cross-env NODE_ENV=development electron .",
     "build": "../scripts/build-all.sh",
     "build:renderer": "cd renderer && npm run build",
     "build:electron": "electron-builder",
@@ -26,6 +26,7 @@
   "devDependencies": {
     "@playwright/test": "^1.54.0",
     "concurrently": "^8.2.2",
+    "cross-env": "^10.1.0",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.0"
   }
