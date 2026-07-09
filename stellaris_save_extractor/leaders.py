@@ -10,6 +10,19 @@ from stellaris_companion.rust_bridge import (
 
 logger = logging.getLogger(__name__)
 
+# Envoys are stored as leaders in the save, but the game shows them in the
+# diplomacy panel (assigned to the galactic community, federations, spy networks,
+# improving/harming relations) — NOT in the Leaders screen. So the leader roster
+# count excludes them and they are reported separately.
+ENVOY_CLASS = "envoy"
+
+
+def _partition_envoys(leaders: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split a leader list into (roster, envoys) by class."""
+    roster = [leader for leader in leaders if leader.get("class") != ENVOY_CLASS]
+    envoys = [leader for leader in leaders if leader.get("class") == ENVOY_CLASS]
+    return roster, envoys
+
 
 class LeadersMixin:
     """Domain methods extracted from the original SaveExtractor."""
@@ -160,8 +173,13 @@ class LeadersMixin:
         # Sort by leader ID to ensure consistent ordering
         leaders_found.sort(key=lambda x: int(x["id"]))
 
-        result["leaders"] = leaders_found
-        result["count"] = len(leaders_found)
+        # Envoys are diplomatic units shown separately from the Leaders screen, so
+        # the roster count excludes them (matches the in-game count).
+        roster, envoys = _partition_envoys(leaders_found)
+        result["leaders"] = roster
+        result["envoys"] = envoys
+        result["count"] = len(roster)
+        result["envoy_count"] = len(envoys)
         result["by_class"] = class_counts
 
         return result

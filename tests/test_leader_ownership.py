@@ -12,6 +12,25 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from stellaris_save_extractor.base import SaveExtractorBase
+from stellaris_save_extractor.leaders import _partition_envoys
+
+
+def test_partition_envoys_splits_roster_from_envoys():
+    # Envoys are leaders in the save but appear in the diplomacy panel, not the
+    # Leaders screen, so the roster count must exclude them.
+    leaders = [
+        {"class": "commander"},
+        {"class": "envoy"},
+        {"class": "scientist"},
+        {"class": "envoy"},
+        {"class": "official"},
+    ]
+
+    roster, envoys = _partition_envoys(leaders)
+
+    assert len(roster) == 3
+    assert len(envoys) == 2
+    assert all(leader["class"] != "envoy" for leader in roster)
 
 
 class _Dummy(SaveExtractorBase):
