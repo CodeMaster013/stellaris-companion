@@ -52,6 +52,12 @@ class LeadersMixin:
         player_id = self.get_player_empire_id()
         class_counts = {}
 
+        # Authoritative hired-leader roster. In 4.x the leaders section also holds
+        # unrecruited recruitment-pool candidates tagged with the player's country,
+        # so we filter to owned_leaders (matches the in-game Leaders screen). Falls
+        # back to the legacy country scan when the field is absent (older saves).
+        owned_leader_ids = self._get_player_owned_leader_ids()
+
         # Phase 1: Iterate and collect player leader data
         # (can't call get_duplicate_values during iter_section - same pipe)
         player_leaders_data = []
@@ -61,9 +67,13 @@ class LeadersMixin:
                 continue
 
             # Check if this leader belongs to the player
-            country_id = leader_data.get("country")
-            if country_id is None or int(country_id) != player_id:
-                continue
+            if owned_leader_ids is not None:
+                if str(leader_id) not in owned_leader_ids:
+                    continue
+            else:
+                country_id = leader_data.get("country")
+                if country_id is None or int(country_id) != player_id:
+                    continue
 
             # P011: Extract class using .get() with defaults
             leader_class = leader_data.get("class")
