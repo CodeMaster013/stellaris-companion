@@ -7,6 +7,8 @@ import re
 # Rust bridge for fast Clausewitz parsing - session mode required
 from stellaris_companion.rust_bridge import ParserError, _get_active_session
 
+from .fleet_classification import classify_owned_fleet
+
 logger = logging.getLogger(__name__)
 
 
@@ -437,9 +439,10 @@ class MilitaryMixin:
             if fleet_id not in owned_set:
                 continue
 
-            # Check if station or civilian
-            is_station = fleet_data.get("station") == "yes"
-            is_civilian = fleet_data.get("civilian") == "yes"
+            # Classify by ship_class (4.x) with a legacy fallback. In 4.x saves
+            # starbases are ship_class=shipclass_starbase with no station flag,
+            # so the old station/power heuristic counted them as military.
+            fleet_kind = classify_owned_fleet(fleet_data)
 
             # Get military power
             mp_str = fleet_data.get("military_power", "0")
@@ -452,12 +455,10 @@ class MilitaryMixin:
             ships = fleet_data.get("ships", [])
             ship_count = len(ships) if isinstance(ships, list) else 0
 
-            if is_station:
+            if fleet_kind == "starbase":
                 # Stations are counted separately via _count_player_starbases
                 pass
-            elif is_civilian:
-                civilian_count += 1
-            elif mp > 100:  # Threshold filters out space creatures with tiny mp
+            elif fleet_kind == "military":
                 # Extract fleet name
                 name_block = fleet_data.get("name")
                 fleet_name = self._resolve_fleet_name(name_block, fleet_id)
@@ -574,19 +575,9 @@ class MilitaryMixin:
             if fleet_id not in owned_set:
                 continue
 
-            # Skip stations and civilian fleets
-            if fleet_data.get("station") == "yes":
-                continue
-            if fleet_data.get("civilian") == "yes":
-                continue
-
-            # Check military power threshold
-            mp_str = fleet_data.get("military_power", "0")
-            try:
-                military_power = float(mp_str)
-            except (ValueError, TypeError):
-                military_power = 0.0
-            if military_power <= 100:
+            # Skip starbases and civilian fleets (ship_class-aware; 4.x starbases
+            # have no station flag). Only combat fleets contribute to composition.
+            if classify_owned_fleet(fleet_data) != "military":
                 continue
 
             # Get fleet name

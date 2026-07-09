@@ -1143,7 +1143,7 @@ class Companion:
         diplomacy = self.extractor.get_diplomacy()
 
         return {
-            "empire_name": self.metadata.get("name", "Unknown"),
+            "empire_name": player.get("empire_name") or self.metadata.get("name", "Unknown"),
             "date": self.metadata.get("date", "Unknown"),
             "military_power": player.get("military_power", 0),
             "fleet_count": player.get("fleet_count", 0),
