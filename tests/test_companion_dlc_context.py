@@ -101,6 +101,55 @@ def test_apply_precomputed_briefing_lists_nomads_unavailable_features(companion)
     assert "Operational Reserves" in companion.system_prompt
 
 
+@pytest.mark.parametrize(
+    ("version", "included", "excluded"),
+    [
+        (
+            "Pegasus v4.4.4",
+            ["uses a 3:1 rule rather than one-to-one conversion"],
+            ["Operational Reserves track Energy and Minerals one-to-one"],
+        ),
+        (
+            "Pegasus v4.4.5",
+            [
+                "Operational Reserves track Energy and Minerals one-to-one",
+                "Resource Abundance slider",
+            ],
+            ["Automated Science Ships return normally after exploring Astral Rifts"],
+        ),
+        (
+            "Pegasus v4.4.6",
+            [
+                "Operational Reserves track Energy and Minerals one-to-one",
+                "Automated Science Ships return normally after exploring Astral Rifts",
+            ],
+            [],
+        ),
+    ],
+)
+def test_advisor_prompt_uses_exact_pegasus_patch_overlays(companion, version, included, excluded):
+    briefing_json = json.dumps({"meta": {"date": "2200.01.01", "version": version}})
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2200.01.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata={
+            "version": version,
+            "required_dlcs": ["Nomads"],
+            "missing_dlcs": [],
+        },
+    )
+
+    for fact in included:
+        assert fact in companion.system_prompt
+    for fact in excluded:
+        assert fact not in companion.system_prompt
+    assert 'A later fact labeled "Override"' in companion.system_prompt
+
+
 def test_build_game_context_prefers_metadata_missing_dlcs_without_extractor(companion):
     companion.metadata = {
         "version": "Corvus v4.2.4",

@@ -9,6 +9,34 @@ from stellaris_companion.rust_bridge import ParserError, _get_active_session
 
 logger = logging.getLogger(__name__)
 
+# Country types that count as diplomatic "empires" for the known-empires tally.
+# Everything else in a relations_manager (enclaves, marauders, drones/space fauna,
+# pre-FTL primitives, internal event factions) is a relation record but not an
+# empire you've made contact with.
+DIPLOMATIC_EMPIRE_TYPES = frozenset({"default", "fallen_empire", "awakened_fallen_empire"})
+
+
+def _is_diplomatic_empire(country_type) -> bool:
+    """True if a target country type counts as a known empire (not a special entity)."""
+    return country_type in DIPLOMATIC_EMPIRE_TYPES
+
+
+def _summarize_relation_types(relations: list[dict]) -> dict:
+    """Count relations by target country type and how many are real empires.
+
+    Returns ``{"empire_count": int, "by_type": {type: count}}``. ``empire_count`` is
+    the count the in-game contacts list roughly reflects; ``relation_count`` (kept
+    separately) remains the raw total including special entities.
+    """
+    by_type: dict[str, int] = {}
+    empire_count = 0
+    for rel in relations:
+        ctype = rel.get("country_type") or "unknown"
+        by_type[ctype] = by_type.get(ctype, 0) + 1
+        if _is_diplomatic_empire(rel.get("country_type")):
+            empire_count += 1
+    return {"empire_count": empire_count, "by_type": by_type}
+
 
 def _format_resolution_name(type_key: str) -> str:
     """Convert a resolution type key to a human-readable name.
@@ -237,6 +265,14 @@ class DiplomacyMixin:
                 target_country_id, f"Empire {target_country_id}"
             )
 
+            # Record the target's country type so callers can distinguish real
+            # empires from special entities (enclaves, marauders, primitives, etc.).
+            target_country = self._get_countries_cached().get(str(target_country_id))
+            if isinstance(target_country, dict):
+                ctype = target_country.get("type")
+                if ctype:
+                    relation_info["country_type"] = ctype
+
             # Add authority and megacorp detection
             authority = country_authorities.get(target_country_id)
             if authority:
@@ -372,6 +408,12 @@ class DiplomacyMixin:
         result["sensor_links"] = sensor_links
         result["treaties"] = treaties
         result["relation_count"] = len(relations_found)
+        # Segment relations by target type: empire_count reflects actual known
+        # empires (what the in-game contacts list roughly shows), while
+        # relation_count stays the raw total including enclaves/marauders/etc.
+        type_summary = _summarize_relation_types(relations_found)
+        result["empire_count"] = type_summary["empire_count"]
+        result["relations_by_type"] = type_summary["by_type"]
         result["federation"] = federation_id
 
         # Summarize by opinion

@@ -23,9 +23,10 @@ def test_get_available_patches_sorts_versions_numerically(patch_dirs):
     patches_dir, _ = patch_dirs
     _write_patch(patches_dir / "4.10.md", "ten")
     _write_patch(patches_dir / "4.2.md", "two")
+    _write_patch(patches_dir / "4.9.6.md", "nine-six")
     _write_patch(patches_dir / "4.9.md", "nine")
 
-    assert personality.get_available_patches() == ["4.2", "4.9", "4.10"]
+    assert personality.get_available_patches() == ["4.2", "4.9", "4.9.6", "4.10"]
 
 
 def test_load_patch_notes_prefers_snapshot_and_appends_newer_deltas(patch_dirs):
@@ -56,14 +57,54 @@ def test_load_patch_notes_appends_44_delta_after_43_snapshot(patch_dirs):
     assert "stale-4-3-delta" not in result
 
 
-def test_bundled_44_patch_includes_stable_444_nomad_facts():
-    raw_resource = (personality.PATCHES_DIR / "4.4.md").read_text(encoding="utf-8")
+def test_exact_patch_overlays_apply_only_at_or_after_their_version(patch_dirs):
+    patches_dir, snapshots_dir = patch_dirs
+    _write_patch(snapshots_dir / "4.3.md", "compiled-through-4-3")
+    _write_patch(patches_dir / "4.4.md", "base-4-4")
+    _write_patch(patches_dir / "4.4.4.md", "overlay-4-4-4")
+    _write_patch(patches_dir / "4.4.5.md", "overlay-4-4-5")
+    _write_patch(patches_dir / "4.4.6.md", "overlay-4-4-6")
+
+    result_443 = personality.load_patch_notes("Pegasus v4.4.3")
+    result_444 = personality.load_patch_notes("Pegasus v4.4.4")
+    result_445 = personality.load_patch_notes("Pegasus v4.4.5")
+    result_446 = personality.load_patch_notes("Pegasus v4.4.6")
+
+    assert result_443 == "compiled-through-4-3\n\nbase-4-4"
+    assert result_444.endswith("base-4-4\n\noverlay-4-4-4")
+    assert "overlay-4-4-5" not in result_444
+    assert result_445.endswith("base-4-4\n\noverlay-4-4-4\n\noverlay-4-4-5")
+    assert "overlay-4-4-6" not in result_445
+    assert result_446.endswith("base-4-4\n\noverlay-4-4-4\n\noverlay-4-4-5\n\noverlay-4-4-6")
+
+
+def test_non_cumulative_loading_keeps_base_and_same_line_overlays(patch_dirs):
+    patches_dir, _ = patch_dirs
+    _write_patch(patches_dir / "4.3.md", "other-minor")
+    _write_patch(patches_dir / "4.4.md", "base-4-4")
+    _write_patch(patches_dir / "4.4.4.md", "overlay-4-4-4")
+    _write_patch(patches_dir / "4.4.5.md", "overlay-4-4-5")
+
     result = personality.load_patch_notes("Pegasus v4.4.4", cumulative=False)
 
-    assert "open-beta-only" not in raw_resource
-    assert "Arkships have inherent 40% habitability" in result
-    assert "strategic-resource mining technology grants +50% harvesting yield" in result
-    assert "Stellar Ignition Contracts are completable" in result
+    assert result == "base-4-4\n\noverlay-4-4-4"
+
+
+def test_bundled_pegasus_overlays_distinguish_444_445_and_446():
+    result_444 = personality.load_patch_notes("Pegasus v4.4.4", cumulative=False)
+    result_445 = personality.load_patch_notes("Pegasus v4.4.5", cumulative=False)
+    result_446 = personality.load_patch_notes("Pegasus v4.4.6", cumulative=False)
+
+    assert "Arkships have inherent 40% habitability" in result_444
+    assert "uses a 3:1 rule rather than one-to-one conversion" in result_444
+    assert "Operational Reserves track Energy and Minerals one-to-one" not in result_444
+    assert "Resource Abundance slider" not in result_444
+
+    assert "Operational Reserves track Energy and Minerals one-to-one" in result_445
+    assert "Resource Abundance slider" in result_445
+    assert "Automated Science Ships return normally after exploring Astral Rifts" not in result_445
+
+    assert "Automated Science Ships return normally after exploring Astral Rifts" in result_446
 
 
 def test_load_patch_notes_handles_two_digit_minor_versions(patch_dirs):
