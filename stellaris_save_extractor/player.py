@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
 from collections import Counter, defaultdict
 
@@ -9,6 +10,106 @@ from collections import Counter, defaultdict
 from stellaris_companion.rust_bridge import ParserError, _get_active_session
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_player_entries(player_list) -> list[dict]:
+    """Normalize a save's ``player`` block into ``[{"country": int, "name": str}]``.
+
+    Stellaris stores one entry per human player. Multiplayer saves have several;
+    single-player saves have exactly one. Country IDs come through as strings and
+    the block may occasionally be surfaced as an index-keyed dict, so both shapes
+    are handled. Malformed entries (missing/non-numeric country) are skipped.
+    """
+    if isinstance(player_list, dict):
+        player_list = list(player_list.values())
+    if not isinstance(player_list, list):
+        return []
+
+    entries: list[dict] = []
+    for item in player_list:
+        if not isinstance(item, dict):
+            continue
+        raw_country = item.get("country")
+        if raw_country is None:
+            continue
+        try:
+            country_id = int(raw_country)
+        except (ValueError, TypeError):
+            continue
+        name = item.get("name")
+        entries.append({"country": country_id, "name": name if isinstance(name, str) else ""})
+    return entries
+
+
+def _select_player_country_id(
+    entries: list[dict],
+    *,
+    override_country_id: int | None = None,
+    override_name: str | None = None,
+) -> tuple[int, dict]:
+    """Choose the player's country ID from the normalized ``player`` entries.
+
+    Priority (per the multiplayer selection fix):
+      1. Explicit ``override_country_id`` (from backend config).
+      2. Explicit ``override_name`` matched against the players' names
+         (case/whitespace-insensitive).
+      3. A single entry (single-player) -> that entry, no warning.
+      4. Fallback to the first entry (legacy behavior) -- the caller logs a
+         warning listing every candidate so users can set an override.
+
+    Returns ``(country_id, info)`` where ``info["method"]`` is one of
+    ``country_id_override``, ``name_override``, ``single``, ``first_fallback``,
+    or ``empty``, and ``info["candidates"]`` holds the normalized entries.
+    """
+    info: dict = {"method": "empty", "candidates": entries}
+
+    if not entries:
+        return 0, info
+
+    if override_country_id is not None:
+        info["method"] = "country_id_override"
+        info["matched"] = any(e["country"] == override_country_id for e in entries)
+        return override_country_id, info
+
+    if override_name:
+        target = override_name.strip().casefold()
+        for entry in entries:
+            if entry["name"].strip().casefold() == target:
+                info["method"] = "name_override"
+                return entry["country"], info
+        # No match -> record it so the caller can warn, then fall through.
+        info["override_name_unmatched"] = override_name
+
+    if len(entries) == 1:
+        info["method"] = "single"
+        return entries[0]["country"], info
+
+    info["method"] = "first_fallback"
+    return entries[0]["country"], info
+
+
+def _get_player_override() -> tuple[int | None, str | None]:
+    """Read the player-empire override from backend settings (environment vars).
+
+    ``STELLARIS_PLAYER_COUNTRY_ID`` selects by country ID; ``STELLARIS_PLAYER_NAME``
+    selects by the local player's name. Both are optional and only matter for
+    multiplayer saves.
+    """
+    country_id: int | None = None
+    raw_id = os.environ.get("STELLARIS_PLAYER_COUNTRY_ID")
+    if raw_id and raw_id.strip():
+        try:
+            country_id = int(raw_id.strip())
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid STELLARIS_PLAYER_COUNTRY_ID=%r (expected an integer)",
+                raw_id,
+            )
+
+    name = os.environ.get("STELLARIS_PLAYER_NAME")
+    if name is not None:
+        name = name.strip() or None
+    return country_id, name
 
 _BASE_NAVAL_CAP = 50.0
 
@@ -170,8 +271,37 @@ class PlayerMixin:
 
         return deduped
 
+    def _get_player_entries(self) -> list[dict]:
+        """Return the normalized ``player`` block, cached per extraction.
+
+        Requires Rust session mode to be active.
+        """
+        cached = getattr(self, "_player_entries_cache", None)
+        if cached is not None:
+            return cached
+
+        session = _get_active_session()
+        if not session:
+            raise ParserError("Rust session required - use 'with session(save_path):' context")
+
+        data = session.extract_sections(["player"])
+        entries = _normalize_player_entries(data.get("player", []))
+        self._player_entries_cache = entries
+        return entries
+
+    def is_multiplayer_save(self) -> bool:
+        """True when the save records more than one human player."""
+        return len(self._get_player_entries()) > 1
+
     def get_player_empire_id(self) -> int:
         """Get the player's country ID.
+
+        For multiplayer saves the ``player`` block lists every human player; the
+        old logic always took the first entry (usually the host), so the wrong
+        empire was analyzed. Selection now honors an explicit backend override
+        (``STELLARIS_PLAYER_COUNTRY_ID`` / ``STELLARIS_PLAYER_NAME``), then falls
+        back to the first entry with a warning. Single-player saves (one entry)
+        are unaffected. The result is cached per extraction.
 
         Requires Rust session mode to be active.
 
@@ -181,16 +311,91 @@ class PlayerMixin:
         Raises:
             ParserError: If no Rust session is active
         """
+        cached = getattr(self, "_player_empire_id_cache", None)
+        if cached is not None:
+            return cached
+
+        entries = self._get_player_entries()
+        override_country_id, override_name = _get_player_override()
+        country_id, info = _select_player_country_id(
+            entries,
+            override_country_id=override_country_id,
+            override_name=override_name,
+        )
+        self._log_player_selection(country_id, info)
+        self._player_empire_id_cache = country_id
+        return country_id
+
+    def _log_player_selection(self, country_id: int, info: dict) -> None:
+        """Emit a helpful log line describing which player empire was chosen."""
+        method = info.get("method")
+        if method in (None, "empty", "single"):
+            return
+
+        if info.get("override_name_unmatched"):
+            logger.warning(
+                "STELLARIS_PLAYER_NAME=%r did not match any player in this save; "
+                "falling back to country %s. Players: %s",
+                info["override_name_unmatched"],
+                country_id,
+                self._describe_player_candidates(info.get("candidates", [])),
+            )
+            return
+
+        if method == "first_fallback":
+            logger.warning(
+                "Multiplayer save: %d player empires found and no player override "
+                "configured; defaulting to the first entry (country %s). Set "
+                "STELLARIS_PLAYER_NAME or STELLARIS_PLAYER_COUNTRY_ID to pick your "
+                "empire. Players: %s",
+                len(info.get("candidates", [])),
+                country_id,
+                self._describe_player_candidates(info.get("candidates", [])),
+            )
+        elif method in ("name_override", "country_id_override"):
+            logger.info(
+                "Selected player empire via %s -> country %s.", method, country_id
+            )
+
+    def _describe_player_candidates(self, candidates: list[dict]) -> str:
+        """Build a readable 'player -> country (empire name)' listing for logs."""
+        parts = []
+        for cand in candidates:
+            cid = cand.get("country")
+            empire = self._resolve_country_empire_name(cid)
+            label = f"player '{cand.get('name')}' -> country {cid}"
+            if empire:
+                label += f" ({empire})"
+            parts.append(label)
+        return "; ".join(parts)
+
+    def _resolve_country_empire_name(self, country_id) -> str | None:
+        """Best-effort resolved empire name for a country ID (used for logging)."""
         session = _get_active_session()
         if not session:
-            raise ParserError("Rust session required - use 'with session(save_path):' context")
+            return None
+        with contextlib.suppress(Exception):
+            entry = session.get_entry("country", str(country_id))
+            if isinstance(entry, dict) and entry.get("name") is not None:
+                return self.resolve_name(
+                    entry["name"], default="", context="country"
+                ).display or None
+        return None
 
-        data = session.extract_sections(["player"])
-        player_list = data.get("player", [])
-        if player_list and isinstance(player_list, list) and len(player_list) > 0:
-            country_id = player_list[0].get("country", "0")
-            return int(country_id)
-        return 0
+    def get_player_empire_name(self) -> str:
+        """Resolve the selected player's empire name.
+
+        In multiplayer the ``meta`` header name reflects whoever saved the game
+        (often the host), so it can't be trusted as the local player's empire.
+        For multiplayer saves the name is resolved from the *selected* country's
+        block; single-player saves keep the existing meta-derived name.
+        """
+        meta_name = self.get_metadata().get("name", "Unknown")
+        if not self.is_multiplayer_save():
+            return meta_name
+
+        resolved = self._resolve_country_empire_name(self.get_player_empire_id())
+        return resolved or meta_name
 
     def get_player_status(self) -> dict:
         """Get the player's current empire status with clear, unambiguous metrics.
@@ -233,7 +438,7 @@ class PlayerMixin:
 
         result = {
             "player_id": player_id,
-            "empire_name": self.get_metadata().get("name", "Unknown"),
+            "empire_name": self.get_player_empire_name(),
             "date": self.get_metadata().get("date", "Unknown"),
         }
 
@@ -292,7 +497,18 @@ class PlayerMixin:
         # Get colonized planets data (already uses Rust when session active)
         planets_data = self.get_planets()
         colonies = planets_data.get("planets", [])
-        total_pops = sum(p.get("population", 0) for p in colonies)
+        summed_pops = sum(p.get("population", 0) for p in colonies)
+
+        # Prefer the empire's authoritative pop count. In 4.x saves the
+        # per-colony population from get_planets can resolve against the wrong
+        # planet-id space (see _get_player_colony_ids); num_sapient_pops is the
+        # game's own figure and matches the in-game Species panel.
+        total_pops = summed_pops
+        if isinstance(player_country, dict):
+            raw_pops = player_country.get("num_sapient_pops")
+            if raw_pops is not None:
+                with contextlib.suppress(ValueError, TypeError):
+                    total_pops = int(raw_pops)
 
         # Separate habitats from planets (different pop capacities)
         habitats = [c for c in colonies if c.get("type", "").startswith("habitat")]
@@ -348,7 +564,7 @@ class PlayerMixin:
             "is_gestalt": False,
             "is_machine": False,
             "is_hive_mind": False,
-            "empire_name": self.get_metadata().get("name", "Unknown"),
+            "empire_name": self.get_player_empire_name(),
         }
 
         # Rust session required

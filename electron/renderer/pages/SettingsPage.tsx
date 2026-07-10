@@ -101,6 +101,7 @@ function SettingsPage({
 
   const [googleApiKey, setGoogleApiKey] = useState('')
   const [saveDir, setSaveDir] = useState('')
+  const [playerName, setPlayerName] = useState('')
   const [uiScale, setUiScale] = useState(1)
   const [uiScaleSaving, setUiScaleSaving] = useState(false)
   const [uiTheme, setUiTheme] = useState<UiTheme>(DEFAULT_UI_THEME)
@@ -136,6 +137,7 @@ function SettingsPage({
     if (settings) {
       setGoogleApiKey(settings.googleApiKeySet ? settings.googleApiKey : '')
       setSaveDir(settings.saveDir || '')
+      setPlayerName(settings.playerName || '')
       setUiScale(settings.uiScale || 1)
       const normalizedTheme = normalizeUiTheme(settings.uiTheme)
       const normalizedChronicleRefreshMode = normalizeChronicleRefreshMode(
@@ -159,8 +161,9 @@ function SettingsPage({
     if (!settings) return
     const hasApiKeyChange = settings.googleApiKeySet ? googleApiKey !== settings.googleApiKey : googleApiKey !== ''
     const hasPathChange = saveDir !== (settings.saveDir || '')
-    setHasChanges(hasApiKeyChange || hasPathChange)
-  }, [googleApiKey, saveDir, settings])
+    const hasPlayerNameChange = playerName !== (settings.playerName || '')
+    setHasChanges(hasApiKeyChange || hasPathChange || hasPlayerNameChange)
+  }, [googleApiKey, saveDir, playerName, settings])
 
   useEffect(() => {
     let cancelled = false
@@ -189,7 +192,7 @@ function SettingsPage({
 
   const handleSave = async () => {
     setSaveSuccess(false)
-    const settingsToSave: Record<string, string | boolean> = { saveDir }
+    const settingsToSave: Record<string, string | boolean> = { saveDir, playerName }
     if (!googleApiKey.includes('...')) {
       settingsToSave.googleApiKey = googleApiKey
     }
@@ -782,6 +785,17 @@ function SettingsPage({
                              <HUDMicro className="block mt-2">
                                  {t('settings.saveData.target')}
                              </HUDMicro>
+                             <div className="pt-2">
+                                 <HUDInput
+                                    label={t('settings.saveData.playerNameLabel')}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    placeholder={t('settings.saveData.playerNamePlaceholder')}
+                                 />
+                                 <HUDMicro className="block mt-2 normal-case">
+                                     {t('settings.saveData.playerNameHelp')}
+                                 </HUDMicro>
+                             </div>
                          </div>
                     </HUDPanel>
                 </section>

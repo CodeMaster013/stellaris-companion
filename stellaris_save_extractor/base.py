@@ -14,6 +14,7 @@ from stellaris_companion.rust_bridge import (
     iter_section_entries,
 )
 
+from .fleet_classification import classify_owned_fleet
 from .name_resolution import ResolvedName
 from .name_resolution import resolve_name as _resolve_name
 
@@ -53,6 +54,8 @@ class SaveExtractorBase:
         self._player_status_cache = None  # Cached player status (expensive to compute)
         self._player_country_entry_cache = None  # Cached player country from Rust get_entry
         self._player_country_content_cache = None  # Cached player country string content
+        self._player_entries_cache = None  # Cached normalized `player` block entries
+        self._player_empire_id_cache = None  # Cached selected player country ID
 
     def close(self) -> None:
         """Release large in-memory state (best-effort)."""
@@ -77,6 +80,8 @@ class SaveExtractorBase:
         self._player_status_cache = None
         self._player_country_entry_cache = None
         self._player_country_content_cache = None
+        self._player_entries_cache = None
+        self._player_empire_id_cache = None
 
     def __enter__(self) -> SaveExtractorBase:
         return self
@@ -897,9 +902,9 @@ class SaveExtractorBase:
             if not isinstance(fleet, dict):
                 continue
 
-            # Direct dict access - no regex needed
-            is_station = fleet.get("station") == "yes"
-            is_civilian = fleet.get("civilian") == "yes"
+            # Classify by ship_class (4.x) with a legacy fallback. In 4.x saves
+            # starbases have ship_class=shipclass_starbase and no station flag.
+            fleet_kind = classify_owned_fleet(fleet)
 
             # Get ship count from ships list/dict
             ships = fleet.get("ships", [])
@@ -912,11 +917,9 @@ class SaveExtractorBase:
             mp = fleet.get("military_power")
             mp = float(mp) if mp is not None else 0.0
 
-            if is_station:
+            if fleet_kind == "starbase":
                 result["starbase_count"] += 1
-            elif is_civilian:
-                result["civilian_fleet_count"] += 1
-            elif mp > 100:  # Threshold filters out space creatures with tiny mp
+            elif fleet_kind == "military":
                 result["military_fleet_count"] += 1
                 result["military_ships"] += ship_count
                 result["total_military_power"] += mp
@@ -1005,6 +1008,27 @@ class SaveExtractorBase:
                     planet_ids.append(planet_id)
 
         return planet_ids
+
+    def _get_player_colony_ids(self) -> list[str]:
+        """Return the player's colony IDs in the pop_group id space.
+
+        Stellaris 4.x pops reference colonies by the country's own colony ids
+        (``owned_planets`` / ``controlled_colonies``), which are a DIFFERENT id
+        space from the top-level ``planets.planet`` section keys. Scanning that
+        section for ``owner == player_id`` (see :meth:`_get_player_planet_ids`)
+        lands on unrelated colonies in 4.x saves and undercounts pops, so prefer
+        the country's own colony list. Falls back to the legacy owner-scan when
+        those fields are absent (older saves).
+        """
+        player_id = self.get_player_empire_id()
+        country = self._get_player_country_entry(player_id)
+        if isinstance(country, dict):
+            for field in ("owned_planets", "controlled_colonies"):
+                ids = country.get(field)
+                if isinstance(ids, list) and ids:
+                    return [str(x) for x in ids]
+
+        return [str(x) for x in self._get_player_planet_ids()]
 
     def _get_pop_ids_for_planets(self, planet_ids: list[str]) -> list[str]:
         """Get all pop IDs from the specified planets.

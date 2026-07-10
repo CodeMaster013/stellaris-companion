@@ -75,6 +75,11 @@ export interface Settings {
   saveDir: string
   // Deprecated (backwards-compat with older main process / renderer builds)
   savePath?: string
+  // Multiplayer: pin which empire the advisor analyzes. `playerName` matches the
+  // player's name in the save; `playerCountryId` overrides by country ID. Empty
+  // means "use the first player entry" (single-player behavior).
+  playerName: string
+  playerCountryId: string
   discordEnabled: boolean
   uiScale: number
   uiTheme: UiTheme
@@ -119,6 +124,8 @@ export function useSettings(): UseSettingsResult {
       const normalized: Settings = {
         ...loaded,
         saveDir: loaded.saveDir || loaded.savePath || '',
+        playerName: loaded.playerName || '',
+        playerCountryId: loaded.playerCountryId ? String(loaded.playerCountryId) : '',
         uiScale: Number.isFinite(parsedUiScale) ? parsedUiScale : 1,
         uiTheme: normalizeUiTheme(loaded.uiTheme),
         chronicleRefreshMode: normalizeChronicleRefreshMode(loaded.chronicleRefreshMode),

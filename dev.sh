@@ -26,13 +26,21 @@ echo "   DB Path: $STELLARIS_DB_PATH"
 echo ""
 
 # Kill any orphaned backend processes from previous runs
-cleanup_orphans() {
-  local pids=$(lsof -ti:8742 2>/dev/null || true)
-  if [ -n "$pids" ]; then
-    echo "🧹 Cleaning up orphaned processes on port 8742..."
-    echo "$pids" | xargs kill -9 2>/dev/null || true
-    sleep 0.5
+kill_port() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti:"$1" 2>/dev/null | xargs kill -9 2>/dev/null || true
+  else
+    powershell.exe -NoProfile -Command \
+      "Get-NetTCPConnection -LocalPort $1 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id \$_.OwningProcess -Force }" \
+      >/dev/null 2>&1 || true
   fi
+}
+
+cleanup_orphans() {
+  echo "🧹 Cleaning up orphaned processes on ports 8742/5173..."
+  kill_port 8742
+  kill_port 5173
+  sleep 0.5
 }
 
 # Cleanup function for shutdown
@@ -53,11 +61,41 @@ cleanup_orphans
 # Start Python backend in background (use venv if available)
 echo "📦 Starting Python backend on :8742..."
 if [ -f "venv/bin/python3" ]; then
-  venv/bin/python3 -m backend.electron_main &
+  PYTHON="venv/bin/python3"
+elif [ -f "venv/Scripts/python.exe" ]; then
+  PYTHON="venv/Scripts/python.exe"
 else
-  python3 -m backend.electron_main &
+  PYTHON="${PYTHON:-python3}"
 fi
-PYTHON_PID=$!
+
+# Multiplayer player-empire override. In dev mode this script launches the
+# backend directly, so Electron's env injection is bypassed. Mirror it by
+# reading the override the app stored in its settings.json (unless already set
+# explicitly via .env / the environment).
+if [ -z "$STELLARIS_PLAYER_NAME" ] && [ -z "$STELLARIS_PLAYER_COUNTRY_ID" ]; then
+  SETTINGS_JSON=""
+  if [ -n "$APPDATA" ] && [ -f "$APPDATA/stellaris-companion/settings.json" ]; then
+    SETTINGS_JSON="$APPDATA/stellaris-companion/settings.json"
+  elif [ -f "$HOME/.config/stellaris-companion/settings.json" ]; then
+    SETTINGS_JSON="$HOME/.config/stellaris-companion/settings.json"
+  elif [ -f "$HOME/Library/Application Support/stellaris-companion/settings.json" ]; then
+    SETTINGS_JSON="$HOME/Library/Application Support/stellaris-companion/settings.json"
+  fi
+  if [ -n "$SETTINGS_JSON" ]; then
+    PLAYER_NAME="$("$PYTHON" -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print(d.get('playerName') or '')" "$SETTINGS_JSON" 2>/dev/null || true)"
+    PLAYER_CID="$("$PYTHON" -c "import json,sys; d=json.load(open(sys.argv[1],encoding='utf-8')); print(d.get('playerCountryId') or '')" "$SETTINGS_JSON" 2>/dev/null || true)"
+    if [ -n "$PLAYER_NAME" ]; then
+      export STELLARIS_PLAYER_NAME="$PLAYER_NAME"
+      echo "   Player override: STELLARIS_PLAYER_NAME=$PLAYER_NAME (from app settings)"
+    fi
+    if [ -n "$PLAYER_CID" ]; then
+      export STELLARIS_PLAYER_COUNTRY_ID="$PLAYER_CID"
+      echo "   Player override: STELLARIS_PLAYER_COUNTRY_ID=$PLAYER_CID (from app settings)"
+    fi
+  fi
+fi
+
+"$PYTHON" -m backend.electron_main &
 
 # Wait for backend to be ready
 echo "⏳ Waiting for backend..."

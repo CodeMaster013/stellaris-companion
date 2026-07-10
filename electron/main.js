@@ -313,6 +313,17 @@ function buildBackendEnv(settings) {
 
   env.STELLARIS_MODEL_ROUTING_MODE = normalizeModelRoutingMode(settings.modelRoutingMode)
 
+  // Multiplayer player-empire selection. In MP saves the `player` block lists
+  // every human player; without an override the backend defaults to the first
+  // entry (often the host). These let the user pin their own empire.
+  if (settings.playerName) {
+    env.STELLARIS_PLAYER_NAME = String(settings.playerName)
+  }
+  if (settings.playerCountryId !== undefined && settings.playerCountryId !== null
+      && String(settings.playerCountryId).trim() !== '') {
+    env.STELLARIS_PLAYER_COUNTRY_ID = String(settings.playerCountryId).trim()
+  }
+
   // Prefer an explicit directory, otherwise auto-detect a standard location.
   const effectiveSaveDir = getEffectiveSaveDir(settings)
   if (effectiveSaveDir) {
@@ -810,6 +821,8 @@ function getSettings() {
   const discordToken = getSecret(SECRET_STORE_KEYS.discordToken)
 
   const saveDir = store.get('saveDir', '')
+  const playerName = store.get('playerName', '')
+  const playerCountryId = store.get('playerCountryId', '')
   const discordEnabled = store.get('discordEnabled', false)
   const uiScale = getUiScaleSetting()
   const uiTheme = getUiThemeSetting()
@@ -826,6 +839,8 @@ function getSettings() {
     saveDir,
     // Backwards-compat: older renderer builds expect `savePath`.
     savePath: saveDir,
+    playerName,
+    playerCountryId,
     discordEnabled,
     uiScale,
     uiTheme,
@@ -844,6 +859,8 @@ function getSettingsWithSecrets() {
   const googleApiKey = getSecret(SECRET_STORE_KEYS.googleApiKey) || ''
   const discordToken = getSecret(SECRET_STORE_KEYS.discordToken) || ''
   const saveDir = store.get('saveDir', '')
+  const playerName = store.get('playerName', '')
+  const playerCountryId = store.get('playerCountryId', '')
   const lastSaveFilePath = store.get('lastSaveFilePath', '')
   const discordEnabled = store.get('discordEnabled', false)
   const uiScale = getUiScaleSetting()
@@ -859,6 +876,8 @@ function getSettingsWithSecrets() {
     saveDir,
     // Backwards-compat: older renderer builds may still send/expect `savePath`.
     savePath: saveDir,
+    playerName,
+    playerCountryId,
     lastSaveFilePath,
     discordEnabled,
     uiScale,
@@ -890,6 +909,14 @@ function saveSettings(settings) {
     store.set('saveDir', nextSaveDir)
     // Save path changes invalidate any cached "last save file" selection.
     store.set('lastSaveFilePath', '')
+  }
+
+  if (settings.playerName !== undefined) {
+    store.set('playerName', String(settings.playerName || '').trim())
+  }
+
+  if (settings.playerCountryId !== undefined) {
+    store.set('playerCountryId', String(settings.playerCountryId || '').trim())
   }
 
   if (settings.discordEnabled !== undefined) {
@@ -1450,7 +1477,11 @@ registerSettingsIpcHandlers({
       changedSettings.googleApiKey !== undefined ||
       changedSettings.saveDir !== undefined ||
       changedSettings.savePath !== undefined ||
-      changedSettings.modelRoutingMode !== undefined
+      changedSettings.modelRoutingMode !== undefined ||
+      // Player-empire override is read from the backend env at launch, so a
+      // change must restart the backend for it to take effect.
+      changedSettings.playerName !== undefined ||
+      changedSettings.playerCountryId !== undefined
 
     if (backendRelevantSettingsChanged && !E2E_SKIP_BACKEND_AUTOSTART) {
       restartPythonBackend(fullSettings)

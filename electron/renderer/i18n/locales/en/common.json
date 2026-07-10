@@ -280,7 +280,10 @@
     "saveData": {
       "directoryLabel": "DIRECTORY PATH",
       "placeholder": "AUTO-DETECT",
-      "target": "TARGET: STELLARIS SAVE GAME DIRECTORY (LOCAL)"
+      "target": "TARGET: STELLARIS SAVE GAME DIRECTORY (LOCAL)",
+      "playerNameLabel": "MULTIPLAYER PLAYER NAME",
+      "playerNamePlaceholder": "SINGLE-PLAYER (AUTO)",
+      "playerNameHelp": "MULTIPLAYER ONLY: ENTER YOUR PLAYER NAME TO ANALYZE YOUR EMPIRE. LEAVE BLANK FOR SINGLE-PLAYER."
     },
     "discord": {
       "loading": "ESTABLISHING HANDSHAKE...",
