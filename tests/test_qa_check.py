@@ -45,7 +45,12 @@ def _export(**overrides):
             "get_technology": {"completed_count": 120, "in_progress": []},
             "get_leaders": {"count": 22},
             "get_wars": {"active_war_count": 1, "count": 1},
-            "get_diplomacy": {"relation_count": 13, "allies": [], "rivals": []},
+            "get_diplomacy": {
+                "relation_count": 13,
+                "empire_count": 4,
+                "allies": [],
+                "rivals": [],
+            },
         },
         "audit": {"smell": [], "validation": {"issues": []}},
     }
@@ -72,6 +77,29 @@ def test_build_checks_military_yields_multiple_checks():
     values = {c["key"]: c["value"] for c in checks}
     assert values["military_ships"] == 93
     assert values["military_fleet_count"] == 2
+
+
+def test_diplomacy_check_uses_empire_count_not_raw_relation_count():
+    checks = build_checks(_export(), ["diplomacy"])
+
+    assert checks == [
+        {
+            "key": "empire_count",
+            "category": "diplomacy",
+            "label": "Known empires",
+            "value": 4,
+            "panel": "Contacts / Diplomacy",
+        }
+    ]
+
+
+def test_diplomacy_check_falls_back_for_older_exports():
+    export = _export(get_diplomacy={"relation_count": 13, "allies": [], "rivals": []})
+
+    checks = build_checks(export, ["diplomacy"])
+
+    assert checks[0]["key"] == "empire_count"
+    assert checks[0]["value"] == 13
 
 
 def test_build_checks_all_categories_no_crash_on_sparse_export():

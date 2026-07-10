@@ -208,12 +208,19 @@ def _checks_wars(e):
 
 
 def _checks_diplomacy(e):
+    # ``relation_count`` includes enclaves, marauders, pre-FTLs, fauna, and
+    # event factions. The in-game Contacts panel is closest to ``empire_count``.
+    # Fall back for exports created before that field was introduced.
+    empire_count = _g(e, "extraction", "get_diplomacy", "empire_count")
+    if empire_count is None:
+        empire_count = _g(e, "extraction", "get_diplomacy", "relation_count")
+
     return [
         _check(
-            "relation_count",
+            "empire_count",
             "diplomacy",
-            "Known empires (relations)",
-            _g(e, "extraction", "get_diplomacy", "relation_count"),
+            "Known empires",
+            empire_count,
             "Contacts / Diplomacy",
         )
     ]
