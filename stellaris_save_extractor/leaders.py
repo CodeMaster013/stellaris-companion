@@ -10,6 +10,19 @@ from stellaris_companion.rust_bridge import (
 
 logger = logging.getLogger(__name__)
 
+# Envoys are stored as leaders in the save, but the game shows them in the
+# diplomacy panel (assigned to the galactic community, federations, spy networks,
+# improving/harming relations) — NOT in the Leaders screen. So the leader roster
+# count excludes them and they are reported separately.
+ENVOY_CLASS = "envoy"
+
+
+def _partition_envoys(leaders: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split a leader list into (roster, envoys) by class."""
+    roster = [leader for leader in leaders if leader.get("class") != ENVOY_CLASS]
+    envoys = [leader for leader in leaders if leader.get("class") == ENVOY_CLASS]
+    return roster, envoys
+
 
 class LeadersMixin:
     """Domain methods extracted from the original SaveExtractor."""
@@ -52,6 +65,12 @@ class LeadersMixin:
         player_id = self.get_player_empire_id()
         class_counts = {}
 
+        # Authoritative hired-leader roster. In 4.x the leaders section also holds
+        # unrecruited recruitment-pool candidates tagged with the player's country,
+        # so we filter to owned_leaders (matches the in-game Leaders screen). Falls
+        # back to the legacy country scan when the field is absent (older saves).
+        owned_leader_ids = self._get_player_owned_leader_ids()
+
         # Phase 1: Iterate and collect player leader data
         # (can't call get_duplicate_values during iter_section - same pipe)
         player_leaders_data = []
@@ -61,9 +80,13 @@ class LeadersMixin:
                 continue
 
             # Check if this leader belongs to the player
-            country_id = leader_data.get("country")
-            if country_id is None or int(country_id) != player_id:
-                continue
+            if owned_leader_ids is not None:
+                if str(leader_id) not in owned_leader_ids:
+                    continue
+            else:
+                country_id = leader_data.get("country")
+                if country_id is None or int(country_id) != player_id:
+                    continue
 
             # P011: Extract class using .get() with defaults
             leader_class = leader_data.get("class")
@@ -150,8 +173,13 @@ class LeadersMixin:
         # Sort by leader ID to ensure consistent ordering
         leaders_found.sort(key=lambda x: int(x["id"]))
 
-        result["leaders"] = leaders_found
-        result["count"] = len(leaders_found)
+        # Envoys are diplomatic units shown separately from the Leaders screen, so
+        # the roster count excludes them (matches the in-game count).
+        roster, envoys = _partition_envoys(leaders_found)
+        result["leaders"] = roster
+        result["envoys"] = envoys
+        result["count"] = len(roster)
+        result["envoy_count"] = len(envoys)
         result["by_class"] = class_counts
 
         return result

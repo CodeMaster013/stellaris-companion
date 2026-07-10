@@ -348,6 +348,23 @@ class SaveExtractorBase:
 
         return None
 
+    def _get_player_owned_leader_ids(self) -> set[str] | None:
+        """Authoritative set of the player's *hired* leader IDs.
+
+        Stellaris 4.x tags recruitment-pool candidates with the player's country,
+        so scanning the ``leaders`` section by country over-counts. The country's
+        ``owned_leaders`` list is the real hired-leader roster (matches the in-game
+        Leaders screen). Returns ``None`` when the field is absent (older saves), so
+        callers can fall back to the legacy country scan.
+        """
+        player_id = self.get_player_empire_id()
+        country = self._get_player_country_entry(player_id)
+        if isinstance(country, dict):
+            owned = country.get("owned_leaders")
+            if isinstance(owned, list):
+                return {str(x) for x in owned}
+        return None
+
     def _get_owned_fleet_ids_from_entry(self, country_entry: dict) -> list[str]:
         """Extract owned fleet IDs from a parsed country dict.
 
