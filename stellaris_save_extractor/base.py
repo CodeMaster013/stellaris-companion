@@ -14,6 +14,11 @@ from stellaris_companion.rust_bridge import (
     iter_section_entries,
 )
 
+from .colony_resolver import (
+    ColonyResolution,
+    candidate_carrier_ids,
+    resolve_player_colonies,
+)
 from .fleet_classification import classify_owned_fleet
 from .name_resolution import ResolvedName
 from .name_resolution import resolve_name as _resolve_name
@@ -56,6 +61,7 @@ class SaveExtractorBase:
         self._player_country_content_cache = None  # Cached player country string content
         self._player_entries_cache = None  # Cached normalized `player` block entries
         self._player_empire_id_cache = None  # Cached selected player country ID
+        self._player_colony_resolution_cache = None  # Cached legacy/4.4 colony mapping
 
     def close(self) -> None:
         """Release large in-memory state (best-effort)."""
@@ -82,6 +88,7 @@ class SaveExtractorBase:
         self._player_country_content_cache = None
         self._player_entries_cache = None
         self._player_empire_id_cache = None
+        self._player_colony_resolution_cache = None
 
     def __enter__(self) -> SaveExtractorBase:
         return self
@@ -1002,50 +1009,78 @@ class SaveExtractorBase:
                     ).display
         return species_names
 
-    def _get_player_planet_ids(self) -> list[str]:
-        """Get IDs of all planets owned by the player.
+    def _get_player_colony_resolution(self) -> ColonyResolution:
+        """Resolve player colonies and their planet/ship carriers once per save."""
+        cached = getattr(self, "_player_colony_resolution_cache", None)
+        if cached is not None:
+            return cached
 
-        Uses Rust extract_sections for parsing (session mode required).
+        session = _get_active_session()
+        if not session:
+            raise ParserError("Rust session required for colony resolution")
 
-        Returns:
-            List of planet ID strings
-        """
         player_id = self.get_player_empire_id()
-        player_id_str = str(player_id)
-        planet_ids = []
+        country = self._get_player_country_entry(player_id) or {}
+        data = session.extract_sections(["colonies", "ship_colonies", "planets"])
+        colonies_section = data.get("colonies", {})
+        ship_colonies = data.get("ship_colonies", {})
+        if not ship_colonies and isinstance(country, dict):
+            ship_colonies = country.get("ship_colonies", {})
+        planets_section = data.get("planets", {})
 
-        # Extract planets section
-        data = extract_sections(self.save_path, ["planets"])
-        planets = data.get("planets", {}).get("planet", {})
+        # A late-game save can contain thousands of ships. Colony records carry
+        # their carrier IDs, so fetch only those candidate ship records.
+        ship_ids = candidate_carrier_ids(colonies_section, ship_colonies)
+        ships: dict[str, dict] = {}
+        if ship_ids:
+            for entry in session.get_entries("ships", ship_ids):
+                ship_id = entry.get("_key")
+                ship = entry.get("_value")
+                if ship_id is not None and isinstance(ship, dict):
+                    ships[str(ship_id)] = ship
 
-        for planet_id, planet_data in planets.items():
-            if isinstance(planet_data, dict):
-                owner = planet_data.get("owner")
-                if owner == player_id_str:
-                    planet_ids.append(planet_id)
+        resolution = resolve_player_colonies(
+            country=country if isinstance(country, dict) else {},
+            player_id=player_id,
+            colonies_section=colonies_section,
+            planets_section=planets_section,
+            ships_section=ships,
+            ship_colonies=ship_colonies,
+        )
+        for warning in resolution.warnings:
+            logger.warning("Colony compatibility: %s", warning)
 
-        return planet_ids
+        self._player_colony_resolution_cache = resolution
+        return resolution
+
+    def _get_player_planet_ids(self) -> list[str]:
+        """Return physical planet carrier IDs for the player's colonies."""
+        return [
+            ref.carrier_id
+            for ref in self._get_player_colony_resolution().refs
+            if ref.carrier_type == "planet" and ref.carrier_id is not None
+        ]
 
     def _get_player_colony_ids(self) -> list[str]:
         """Return the player's colony IDs in the pop_group id space.
 
-        Stellaris 4.x pops reference colonies by the country's own colony ids
-        (``owned_planets`` / ``controlled_colonies``), which are a DIFFERENT id
-        space from the top-level ``planets.planet`` section keys. Scanning that
-        section for ``owner == player_id`` (see :meth:`_get_player_planet_ids`)
-        lands on unrelated colonies in 4.x saves and undercounts pops, so prefer
-        the country's own colony list. Falls back to the legacy owner-scan when
-        those fields are absent (older saves).
+        In 4.4+ this is the ID of a separate Colony record; before 4.4 it is
+        identical to the planet ID. Pop groups continue to store this value in
+        their legacy-named ``planet`` field.
         """
+        if _get_active_session():
+            return [ref.colony_id for ref in self._get_player_colony_resolution().refs]
+
+        # Preserve the lightweight helper contract used by unit doubles and the
+        # legacy regex path. Full 4.4 carrier resolution requires session mode.
         player_id = self.get_player_empire_id()
         country = self._get_player_country_entry(player_id)
         if isinstance(country, dict):
             for field in ("owned_planets", "controlled_colonies"):
                 ids = country.get(field)
                 if isinstance(ids, list) and ids:
-                    return [str(x) for x in ids]
-
-        return [str(x) for x in self._get_player_planet_ids()]
+                    return [str(value) for value in ids]
+        return [str(value) for value in self._get_player_planet_ids()]
 
     def _get_pop_ids_for_planets(self, planet_ids: list[str]) -> list[str]:
         """Get all pop IDs from the specified planets.
@@ -1059,20 +1094,13 @@ class SaveExtractorBase:
             List of pop ID strings
         """
         pop_ids = []
-        planet_id_set = set(planet_ids)
-
-        # Extract planets section
-        data = extract_sections(self.save_path, ["planets"])
-        planets = data.get("planets", {}).get("planet", {})
-
-        for planet_id, planet_data in planets.items():
-            if planet_id not in planet_id_set:
+        requested_ids = {str(planet_id) for planet_id in planet_ids}
+        for ref in self._get_player_colony_resolution().refs:
+            if ref.colony_id not in requested_ids and ref.carrier_id not in requested_ids:
                 continue
-
-            if isinstance(planet_data, dict):
-                pop_jobs = planet_data.get("pop_jobs", [])
-                if isinstance(pop_jobs, list):
-                    pop_ids.extend(pop_jobs)
+            pop_jobs = ref.colony.get("pop_jobs", ref.carrier.get("pop_jobs", []))
+            if isinstance(pop_jobs, list):
+                pop_ids.extend(pop_jobs)
 
         return pop_ids
 

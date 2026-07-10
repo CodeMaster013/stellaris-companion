@@ -8,12 +8,18 @@ picks the right empire from an explicit override, the local player name, or a
 logged first-entry fallback.
 """
 
+import contextlib
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
+from stellaris_companion import rust_bridge
+from stellaris_save_extractor.base import SaveExtractorBase
 from stellaris_save_extractor.player import (
+    PlayerMixin,
     _normalize_player_entries,
     _select_player_country_id,
 )
@@ -109,14 +115,6 @@ def test_empty_player_block_returns_zero():
 # methods (env override + name threading) against an injected fake session, so
 # the wiring is regression-protected without needing a real multiplayer save.
 # ---------------------------------------------------------------------------
-
-import contextlib
-
-import pytest
-
-from stellaris_companion import rust_bridge
-from stellaris_save_extractor.base import SaveExtractorBase
-from stellaris_save_extractor.player import PlayerMixin
 
 # Custom empire names are stored as literal name blocks in the save.
 COUNTRY_ENTRIES = {

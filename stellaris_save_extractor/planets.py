@@ -63,8 +63,6 @@ class PlanetsMixin:
 
         result = {"planets": [], "count": 0, "total_pops": 0}
 
-        player_id = self.get_player_empire_id()
-
         # Build population map from pop_groups section (using session)
         pop_by_planet = self._get_population_by_planet_rust()
 
@@ -85,34 +83,54 @@ class PlanetsMixin:
             "gas_giant",
         }
 
-        # Use session extract_sections for planets (reuses parsed data, no spawn)
-        # The planets section has nested structure: planets.planet.{id: {...}}
-        data = session.extract_sections(["planets"])
-        planets_data = data.get("planets", {}).get("planet", {})
-
+        resolution = self._get_player_colony_resolution()
         planets_found = []
 
-        for planet_id, planet in planets_data.items():
-            if not isinstance(planet, dict):
-                continue
+        def colony_value(colony: dict, carrier: dict, key: str, default=None):
+            value = colony.get(key)
+            return carrier.get(key, default) if value is None else value
 
-            # Check if this planet is owned by the player
-            owner = planet.get("owner")
-            if owner is None or int(owner) != player_id:
-                continue
+        def list_values(value) -> list:
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                return list(value.values())
+            return []
+
+        for ref in resolution.refs:
+            colony = ref.colony
+            carrier = ref.carrier
 
             # Get planet class and skip non-habitable
-            planet_class = planet.get("planet_class", "")
+            planet_class = colony_value(colony, carrier, "planet_class", "")
             ptype = planet_class.replace("pc_", "") if planet_class else ""
+            if ref.carrier_type == "ship" and not ptype:
+                ship_type = carrier.get("ship_size") or carrier.get("ship_class")
+                if isinstance(ship_type, str):
+                    ptype = ship_type.removeprefix("shipclass_")
+                else:
+                    ptype = "ship_colony"
 
-            # Skip stars and non-habitable types
-            if ptype.endswith("_star") or ptype in non_habitable:
+            # The authoritative 4.4 colony list may use ship carriers. Only
+            # apply the old physical-world filter to legacy planet records.
+            if ref.schema == "legacy_planet" and (
+                ptype.endswith("_star") or ptype in non_habitable
+            ):
                 continue
 
-            planet_info = {"id": str(planet_id)}
+            display_id = ref.carrier_id or ref.colony_id
+            planet_info = {"id": str(display_id)}
+            if ref.schema == "colony_carrier":
+                planet_info.update(
+                    {
+                        "colony_id": ref.colony_id,
+                        "carrier_type": ref.carrier_type,
+                        "carrier_id": ref.carrier_id,
+                    }
+                )
 
             # Extract name
-            name_data = planet.get("name")
+            name_data = carrier.get("name") or colony.get("name")
             if name_data:
                 planet_info["name"] = self._extract_planet_name(name_data)
 
@@ -121,48 +139,59 @@ class PlanetsMixin:
                 planet_info["type"] = ptype
 
             # Extract planet size
-            size = planet.get("planet_size")
+            size = colony_value(colony, carrier, "planet_size")
             if size is not None:
-                planet_info["size"] = int(size)
+                with contextlib.suppress(ValueError, TypeError):
+                    planet_info["size"] = int(size)
 
-            # Get population from pop_groups
-            planet_id_int = int(planet_id)
-            planet_info["population"] = pop_by_planet.get(planet_id_int, 0)
+            # Pop groups retain the legacy field name ``planet`` but reference
+            # the Colony ID in 4.4+, not the carrier's planet/ship ID.
+            try:
+                population = pop_by_planet.get(int(ref.colony_id), 0)
+            except (ValueError, TypeError):
+                population = 0
+            planet_info["population"] = population
             result["total_pops"] += planet_info["population"]
 
             # Extract stability
-            stability = planet.get("stability")
+            stability = colony_value(colony, carrier, "stability")
             if stability is not None:
-                planet_info["stability"] = float(stability)
+                with contextlib.suppress(ValueError, TypeError):
+                    planet_info["stability"] = float(stability)
 
             # Extract amenities
-            amenities = planet.get("amenities")
+            amenities = colony_value(colony, carrier, "amenities")
             if amenities is not None:
-                planet_info["amenities"] = float(amenities)
+                with contextlib.suppress(ValueError, TypeError):
+                    planet_info["amenities"] = float(amenities)
 
             # Extract free amenities (surplus/deficit)
-            free_amenities = planet.get("free_amenities")
+            free_amenities = colony_value(colony, carrier, "free_amenities")
             if free_amenities is not None:
-                planet_info["free_amenities"] = float(free_amenities)
+                with contextlib.suppress(ValueError, TypeError):
+                    planet_info["free_amenities"] = float(free_amenities)
 
             # Extract crime
-            crime = planet.get("crime")
+            crime = colony_value(colony, carrier, "crime")
             if crime is not None:
-                planet_info["crime"] = round(float(crime), 1)
+                with contextlib.suppress(ValueError, TypeError):
+                    planet_info["crime"] = round(float(crime), 1)
 
             # Extract permanent planet modifier
-            pm = planet.get("planet_modifier")
-            if pm:
+            pm = colony_value(colony, carrier, "planet_modifier")
+            if isinstance(pm, str) and pm:
                 planet_info["planet_modifier"] = pm.replace("pm_", "")
 
             # Extract timed modifiers
-            timed_mods = self._extract_timed_modifiers_rust(planet.get("timed_modifier"))
+            timed_mods = self._extract_timed_modifiers_rust(
+                colony_value(colony, carrier, "timed_modifier")
+            )
             if timed_mods:
                 planet_info["modifiers"] = timed_mods
 
             # Extract player's own buildings from buildings_cache
-            player_buildings = planet.get("buildings_cache", [])
-            if player_buildings and isinstance(player_buildings, list):
+            player_buildings = list_values(colony_value(colony, carrier, "buildings_cache", []))
+            if player_buildings:
                 resolved_player_buildings = []
                 for bid in player_buildings:
                     bid_str = str(bid)
@@ -175,8 +204,10 @@ class PlanetsMixin:
 
             # Extract branch offices (megacorp buildings on our planets)
             # These are NOT the player's buildings - they're owned by other empires
-            ext_buildings = planet.get("externally_owned_buildings", [])
-            if ext_buildings and isinstance(ext_buildings, list):
+            ext_buildings = list_values(
+                colony_value(colony, carrier, "externally_owned_buildings", [])
+            )
+            if ext_buildings:
                 branch_offices = []
                 for ext_entry in ext_buildings:
                     if isinstance(ext_entry, dict):
@@ -206,23 +237,29 @@ class PlanetsMixin:
                     planet_info["branch_offices"] = branch_offices
 
             # Extract districts count
-            districts = planet.get("districts", [])
-            if isinstance(districts, list):
-                planet_info["district_count"] = len(districts)
+            raw_districts = colony_value(colony, carrier, "districts", [])
+            if isinstance(raw_districts, (list, dict)):
+                planet_info["district_count"] = len(list_values(raw_districts))
 
             # Extract last building/district changed for context
-            last_building = planet.get("last_building_changed")
+            last_building = colony_value(colony, carrier, "last_building_changed")
             if last_building:
                 planet_info["last_building"] = last_building
 
-            last_district = planet.get("last_district_changed")
+            last_district = colony_value(colony, carrier, "last_district_changed")
             if last_district:
                 planet_info["last_district"] = last_district
 
             planets_found.append(planet_info)
 
-        # Sort by planet ID for consistent ordering
-        planets_found.sort(key=lambda x: int(x["id"]))
+        # Sort numeric IDs first while remaining safe for modded string IDs.
+        def sort_key(item: dict) -> tuple[int, int | str]:
+            try:
+                return 0, int(item["id"])
+            except (ValueError, TypeError):
+                return 1, str(item["id"])
+
+        planets_found.sort(key=sort_key)
 
         result["planets"] = planets_found
         result["count"] = len(planets_found)
@@ -236,6 +273,17 @@ class PlanetsMixin:
             type_counts[ptype] += 1
 
         result["by_type"] = type_counts
+
+        if resolution.schema == "colony_carrier":
+            result["schema"] = resolution.schema
+            result["planet_colonies"] = sum(
+                1 for planet in planets_found if planet.get("carrier_type") == "planet"
+            )
+            result["ship_colonies"] = sum(
+                1 for planet in planets_found if planet.get("carrier_type") == "ship"
+            )
+            if resolution.warnings:
+                result["_warnings"] = list(resolution.warnings)
 
         return result
 

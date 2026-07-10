@@ -61,8 +61,9 @@ def test_legacy_no_markers_uses_power_threshold():
 
 def test_unknown_ship_class_falls_back_to_legacy_heuristic():
     # Unknown/future class with no station flag: treat by power heuristic.
-    assert classify_owned_fleet({"ship_class": "shipclass_future", "military_power": "500"}) == "military"
-    # ...but a legacy station flag still wins.
     assert (
-        classify_owned_fleet({"ship_class": "shipclass_future", "station": "yes"}) == "starbase"
+        classify_owned_fleet({"ship_class": "shipclass_future", "military_power": "500"})
+        == "military"
     )
+    # ...but a legacy station flag still wins.
+    assert classify_owned_fleet({"ship_class": "shipclass_future", "station": "yes"}) == "starbase"

@@ -111,6 +111,7 @@ def _get_player_override() -> tuple[int | None, str | None]:
         name = name.strip() or None
     return country_id, name
 
+
 _BASE_NAVAL_CAP = 50.0
 
 _NAVAL_CAP_DIFFICULTY_MULTS = {
@@ -353,9 +354,7 @@ class PlayerMixin:
                 self._describe_player_candidates(info.get("candidates", [])),
             )
         elif method in ("name_override", "country_id_override"):
-            logger.info(
-                "Selected player empire via %s -> country %s.", method, country_id
-            )
+            logger.info("Selected player empire via %s -> country %s.", method, country_id)
 
     def _describe_player_candidates(self, candidates: list[dict]) -> str:
         """Build a readable 'player -> country (empire name)' listing for logs."""
@@ -377,9 +376,9 @@ class PlayerMixin:
         with contextlib.suppress(Exception):
             entry = session.get_entry("country", str(country_id))
             if isinstance(entry, dict) and entry.get("name") is not None:
-                return self.resolve_name(
-                    entry["name"], default="", context="country"
-                ).display or None
+                return (
+                    self.resolve_name(entry["name"], default="", context="country").display or None
+                )
         return None
 
     def get_player_empire_name(self) -> str:
@@ -510,14 +509,19 @@ class PlayerMixin:
                 with contextlib.suppress(ValueError, TypeError):
                     total_pops = int(raw_pops)
 
-        # Separate habitats from planets (different pop capacities)
-        habitats = [c for c in colonies if c.get("type", "").startswith("habitat")]
-        regular_planets = [c for c in colonies if not c.get("type", "").startswith("habitat")]
+        # Separate physical habitats/planets from 4.4 ship-carried colonies.
+        ship_colonies = [c for c in colonies if c.get("carrier_type") == "ship"]
+        physical_colonies = [c for c in colonies if c.get("carrier_type") != "ship"]
+        habitats = [c for c in physical_colonies if c.get("type", "").startswith("habitat")]
+        regular_planets = [
+            c for c in physical_colonies if not c.get("type", "").startswith("habitat")
+        ]
 
         habitat_pops = sum(p.get("population", 0) for p in habitats)
         planet_pops = sum(p.get("population", 0) for p in regular_planets)
+        ship_colony_pops = sum(p.get("population", 0) for p in ship_colonies)
 
-        result["colonies"] = {
+        colony_summary = {
             "total_count": len(colonies),
             "total_population": total_pops,
             "avg_pops_per_colony": (round(total_pops / len(colonies), 1) if colonies else 0),
@@ -536,6 +540,18 @@ class PlayerMixin:
                 ),
             },
         }
+        if planets_data.get("schema") == "colony_carrier":
+            colony_summary["_note"] = (
+                "These are colonies with population, including ship-carried Arkship colonies"
+            )
+            colony_summary["ship_colonies"] = {
+                "count": len(ship_colonies),
+                "population": ship_colony_pops,
+                "avg_pops": (
+                    round(ship_colony_pops / len(ship_colonies), 1) if ship_colonies else 0
+                ),
+            }
+        result["colonies"] = colony_summary
 
         return result
 
@@ -1218,26 +1234,16 @@ class PlayerMixin:
         if not session:
             return {"flat_additions": {}, "unresolved_source_families": set()}
 
-        planets = session.extract_sections(["planets"]).get("planets", {}).get("planet", {})
         pop_jobs_section = session.extract_sections(["pop_jobs"]).get("pop_jobs", {})
-        if not isinstance(planets, dict) or not isinstance(pop_jobs_section, dict):
+        if not isinstance(pop_jobs_section, dict):
             return {"flat_additions": {}, "unresolved_source_families": set()}
 
         flat_additions: dict[str, float] = defaultdict(float)
         unresolved: set[str] = set()
         soldier_bonus = 1.0 if "tech_ground_defense_planning" in researched_techs else 0.0
 
-        planet_ids = player_country.get("owned_planets", [])
-        if isinstance(planet_ids, dict):
-            planet_ids = list(planet_ids.values())
-        if not isinstance(planet_ids, list):
-            return {"flat_additions": {}, "unresolved_source_families": set()}
-
-        for planet_id in planet_ids:
-            planet = planets.get(str(planet_id))
-            if not isinstance(planet, dict):
-                continue
-            pop_job_refs = planet.get("pop_jobs", [])
+        for colony_ref in self._get_player_colony_resolution().refs:
+            pop_job_refs = colony_ref.colony.get("pop_jobs", colony_ref.carrier.get("pop_jobs", []))
             if isinstance(pop_job_refs, dict):
                 pop_job_refs = list(pop_job_refs.values())
             if not isinstance(pop_job_refs, list):
