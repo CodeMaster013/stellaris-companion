@@ -123,6 +123,7 @@ function ChroniclePage({
   const queuedForceRefreshRef = useRef(false)
   const chronicleRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastAutoSavesRefreshAtRef = useRef(0)
+  const autoSavesRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastFocusChronicleRefreshAtRef = useRef(0)
   const lastSeenIngestionUpdatedAtRef = useRef<number | null>(null)
   const didInitChapterSelectionRef = useRef(false)
@@ -353,8 +354,26 @@ function ChroniclePage({
         clearTimeout(chronicleRetryTimerRef.current)
         chronicleRetryTimerRef.current = null
       }
+      if (autoSavesRefreshTimerRef.current) {
+        clearTimeout(autoSavesRefreshTimerRef.current)
+        autoSavesRefreshTimerRef.current = null
+      }
     }
   }, [loadSaves])
+
+  const refreshSessionsAfterIngestion = useCallback(() => {
+    autoSavesRefreshTimerRef.current = null
+    if (!isMountedRef.current) return
+
+    lastAutoSavesRefreshAtRef.current = Date.now()
+    if (!isDocumentVisible()) {
+      pendingVisibleChronicleRefreshRef.current = true
+      void finalizePendingChaptersHidden()
+      return
+    }
+
+    void loadSaves({ silent: true })
+  }, [finalizePendingChaptersHidden, loadSaves])
 
   // Refresh sessions when backend connects or ingestion advances so chronicle
   // updates while gameplay continues in the background.
@@ -388,16 +407,18 @@ function ChroniclePage({
       if (!shouldRefresh) return
 
       const now = Date.now()
-      if (now - lastAutoSavesRefreshAtRef.current < 4000) return
-      lastAutoSavesRefreshAtRef.current = now
-
-      if (!isDocumentVisible()) {
-        pendingVisibleChronicleRefreshRef.current = true
-        void finalizePendingChaptersHidden()
+      const throttleRemainingMs = 4000 - (now - lastAutoSavesRefreshAtRef.current)
+      if (throttleRemainingMs > 0) {
+        if (!autoSavesRefreshTimerRef.current) {
+          autoSavesRefreshTimerRef.current = setTimeout(
+            refreshSessionsAfterIngestion,
+            throttleRemainingMs,
+          )
+        }
         return
       }
 
-      void loadSaves({ silent: true })
+      refreshSessionsAfterIngestion()
     })
 
     return () => {
@@ -408,6 +429,7 @@ function ChroniclePage({
     finalizePendingChaptersHidden,
     latestSessionBySaveId,
     loadSaves,
+    refreshSessionsAfterIngestion,
     selectedSaveId,
   ])
 
