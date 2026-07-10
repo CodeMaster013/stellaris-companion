@@ -126,7 +126,7 @@ def _carrier_hint(
         elif "ship" in lowered or "arkship" in lowered:
             carrier_type = "ship"
 
-    for key in ("id", "carrier_id", "key", "value"):
+    for key in ("reference", "id", "carrier_id", "key", "value"):
         carrier_id = _as_id(value.get(key))
         if carrier_id is not None:
             return carrier_type, carrier_id

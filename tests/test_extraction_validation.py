@@ -209,5 +209,34 @@ def test_fleet_validator_uses_ship_class_before_legacy_station_marker():
     assert not any(warning["check"] == "count_mismatch" for warning in result.warnings)
 
 
+class _MachineResourceValidatorExtractorDouble:
+    def get_resources(self):
+        values = {"energy": 100.0, "minerals": 50.0, "alloys": 25.0}
+        return {
+            "stockpiles": values,
+            "monthly_income": {},
+            "monthly_expenses": {},
+            "net_monthly": values,
+        }
+
+    def get_empire_identity(self):
+        return {"is_machine": True, "is_hive_mind": False}
+
+
+def test_resource_validator_does_not_require_food_or_consumer_goods_for_machines():
+    validator = object.__new__(ExtractionValidator)
+    validator.extractor = _MachineResourceValidatorExtractorDouble()
+
+    result = validator.validate_resources()
+
+    missing = {
+        warning.get("details", {}).get("resource")
+        for warning in result.warnings
+        if warning["check"] == "missing_essential"
+    }
+    assert "food" not in missing
+    assert "consumer_goods" not in missing
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -1021,8 +1021,10 @@ class SaveExtractorBase:
 
         player_id = self.get_player_empire_id()
         country = self._get_player_country_entry(player_id) or {}
-        data = session.extract_sections(["colonies", "ship_colonies", "planets"])
-        colonies_section = data.get("colonies", {})
+        data = session.extract_sections(["colony", "colonies", "ship_colonies", "planets"])
+        # Pegasus serializes the top-level collection as singular ``colony``.
+        # Keep the plural fallback for synthetic/transitional parser shapes.
+        colonies_section = data.get("colony") or data.get("colonies", {})
         ship_colonies = data.get("ship_colonies", {})
         if not ship_colonies and isinstance(country, dict):
             ship_colonies = country.get("ship_colonies", {})

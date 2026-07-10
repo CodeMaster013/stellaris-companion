@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from stellaris_save_extractor.base import SaveExtractorBase
 from stellaris_save_extractor.colony_resolver import (
     ColonyRef,
     ColonyResolution,
@@ -37,8 +38,8 @@ def test_44_settled_colonies_resolve_separate_planet_carriers():
         country={"owned_planets": [24, 325], "controlled_colonies": [1, 62]},
         player_id=1,
         colonies_section={
-            "1": {"carrier": {"type": "planet", "id": 24}, "stability": "72"},
-            "62": {"carrier": {"type": "planet", "id": 325}, "stability": "81"},
+            "1": {"carrier": {"type": "planet", "reference": 24}, "stability": "72"},
+            "62": {"carrier": {"type": "planet", "reference": 325}, "stability": "81"},
         },
         planets_section={
             "planet": {
@@ -65,7 +66,7 @@ def test_44_ship_colony_resolves_arkship_carrier():
         colonies_section={
             "colony": {
                 "7": {
-                    "carrier": {"type": "ship", "id": 900},
+                    "carrier": {"type": "ship", "reference": 900},
                     "planet_class": "pc_ark",
                 }
             }
@@ -137,6 +138,59 @@ def test_candidate_carrier_ids_avoid_loading_the_entire_ship_section():
     # Fetching the planet ID as well is harmless: get_entries("ships", ...) skips
     # absent keys and protects against overlapping numeric ID spaces.
     assert candidates == ["24", "900"]
+
+
+class _PegasusSessionDouble:
+    def extract_sections(self, sections):
+        assert sections == ["colony", "colonies", "ship_colonies", "planets"]
+        return {
+            "colony": {
+                "0": {
+                    "carrier": {"type": "planet", "reference": "8"},
+                    "num_sapient_pops": "5436",
+                }
+            },
+            "planets": {
+                "planet": {
+                    "8": {
+                        "colony": "0",
+                        "owner": "0",
+                        "planet_class": "pc_ocean",
+                    }
+                }
+            },
+        }
+
+    def get_entries(self, section, ids):
+        assert section == "ships"
+        assert ids == ["8"]
+        return []
+
+
+class _BaseDouble(SaveExtractorBase):
+    def __init__(self):
+        self._player_colony_resolution_cache = None
+
+    def get_player_empire_id(self):
+        return 0
+
+    def _get_player_country_entry(self, _player_id):
+        return {"owned_planets": [0], "controlled_colonies": [0]}
+
+
+def test_base_reads_real_pegasus_singular_colony_section(monkeypatch):
+    from stellaris_save_extractor import base as base_module
+
+    session = _PegasusSessionDouble()
+    monkeypatch.setattr(base_module, "_get_active_session", lambda: session)
+
+    resolution = _BaseDouble()._get_player_colony_resolution()
+
+    assert resolution.schema == "colony_carrier"
+    assert len(resolution.refs) == 1
+    assert resolution.refs[0].colony_id == "0"
+    assert resolution.refs[0].carrier_type == "planet"
+    assert resolution.refs[0].carrier_id == "8"
 
 
 class _PlanetsDouble(PlanetsMixin):

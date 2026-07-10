@@ -853,8 +853,21 @@ class ExtractionValidator:
             else:
                 result.add_pass()
 
-        # Check 5: Essential resources are present
-        essential_resources = ["energy", "minerals", "food", "alloys", "consumer_goods"]
+        # Check 5: Essential resources are present. Gestalt economies do not use
+        # the standard Consumer Goods loop, and Machine empires do not require
+        # Food unless their particular population mix creates that demand.
+        try:
+            identity = self.extractor.get_empire_identity()
+        except Exception:
+            identity = {}
+        is_machine = isinstance(identity, dict) and identity.get("is_machine") is True
+        is_hive = isinstance(identity, dict) and identity.get("is_hive_mind") is True
+
+        essential_resources = ["energy", "minerals", "alloys"]
+        if not is_machine:
+            essential_resources.append("food")
+        if not is_machine and not is_hive:
+            essential_resources.append("consumer_goods")
 
         for resource in essential_resources:
             if resource not in stockpiles and resource not in net_monthly:
