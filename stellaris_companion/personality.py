@@ -22,23 +22,35 @@ PATCHES_DIR = (
 )
 PATCH_SNAPSHOTS_DIR = PATCHES_DIR / "snapshots"
 
-_MAJOR_MINOR_PATTERN = re.compile(r"(\d+\.\d+)")
+_PATCH_VERSION_PATTERN = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
 
 
-def _parse_patch_version(version: str) -> tuple[int, int] | None:
-    """Parse a major.minor patch version into a sortable tuple."""
-    match = re.fullmatch(r"(\d+)\.(\d+)", str(version or "").strip())
+def _parse_patch_version(version: str) -> tuple[int, int, int] | None:
+    """Parse a major.minor[.patch] version into a sortable tuple."""
+    match = re.fullmatch(r"(\d+)\.(\d+)(?:\.(\d+))?", str(version or "").strip())
     if not match:
         return None
-    return int(match.group(1)), int(match.group(2))
+    return int(match.group(1)), int(match.group(2)), int(match.group(3) or 0)
+
+
+def _extract_patch_version(version: str) -> str | None:
+    """Extract the most specific supported version from a game version string."""
+    match = _PATCH_VERSION_PATTERN.search(str(version or ""))
+    if not match:
+        return None
+    parts = [match.group(1), match.group(2)]
+    if match.group(3) is not None:
+        parts.append(match.group(3))
+    return ".".join(parts)
 
 
 def _extract_major_minor(version: str) -> str | None:
     """Extract the major.minor portion from a full game version string."""
-    match = _MAJOR_MINOR_PATTERN.search(str(version or ""))
-    if not match:
+    extracted = _extract_patch_version(version)
+    parsed = _parse_patch_version(extracted) if extracted else None
+    if parsed is None:
         return None
-    return match.group(1)
+    return f"{parsed[0]}.{parsed[1]}"
 
 
 def _clean_patch_content(content: str) -> str:
@@ -66,7 +78,7 @@ def _list_versioned_markdown(directory: Path) -> list[str]:
     if not directory.exists():
         return []
 
-    versions: list[tuple[tuple[int, int], str]] = []
+    versions: list[tuple[tuple[int, int, int], str]] = []
     for file_path in directory.glob("*.md"):
         version = file_path.stem
         parsed = _parse_patch_version(version)
@@ -83,9 +95,9 @@ def load_patch_notes(
 ) -> str | None:
     """Load pre-processed patch notes for a given game version.
 
-    Patch notes are stored in patches/{major}.{minor}.md files,
-    pre-transformed by LLM to contain present-tense facts about
-    game mechanics (no change-oriented language).
+    Base notes are stored in ``patches/{major}.{minor}.md``. Material hotfix
+    changes can be layered through exact overlays such as ``patches/4.4.5.md``.
+    Files contain present-tense game mechanics rather than raw change logs.
 
     Args:
         version: Game version string, e.g., "Corvus v4.2.4"
@@ -98,20 +110,30 @@ def load_patch_notes(
     if not version:
         return None
 
-    # Extract major.minor from version string (e.g., "Corvus v4.2.4" -> "4.2")
-    target_version = _extract_major_minor(version)
+    # Preserve the patch component so material hotfix overlays apply only to
+    # saves created with that patch or newer (e.g. 4.4.5, but not 4.4.4).
+    target_version = _extract_patch_version(version)
     target_key = _parse_patch_version(target_version) if target_version else None
     if target_key is None or target_version is None:
         return None
 
     if not cumulative:
-        return _load_patch_file(target_version, directory=PATCHES_DIR)
+        current_line = []
+        for patch_ver in get_available_patches():
+            patch_key = _parse_patch_version(patch_ver)
+            if patch_key is None:
+                continue
+            if patch_key[:2] == target_key[:2] and patch_key <= target_key:
+                content = _load_patch_file(patch_ver, directory=PATCHES_DIR)
+                if content:
+                    current_line.append(content)
+        return "\n\n".join(current_line) if current_line else None
 
     # Load all patches from 4.0 up to target version. Prefer a compiled snapshot
     # when available so the prompt can stay cumulative without duplicating old text.
     all_patches = get_available_patches()
     combined = []
-    snapshot_key: tuple[int, int] | None = None
+    snapshot_key: tuple[int, int, int] | None = None
 
     if prefer_snapshot:
         snapshot_versions = get_available_patch_snapshots()
@@ -147,7 +169,7 @@ def get_available_patches() -> list[str]:
     """Get list of available patch versions.
 
     Returns:
-        List of version strings (e.g., ['4.0', '4.1', '4.2'])
+        List of version strings (e.g., ['4.3', '4.4', '4.4.5'])
     """
     return _list_versioned_markdown(PATCHES_DIR)
 
@@ -442,6 +464,8 @@ VERSION & DLC AWARENESS:
 [GAME MECHANICS - current version facts]
 The following describes how mechanics work in {version}.
 Use these as ground truth for your advice. Do not reference patches, updates, or changes.
+Exact-version overlays are ordered from oldest to newest. A later fact labeled "Override"
+supersedes an earlier fact about the same mechanic.
 
 {patch_notes}"""
 
