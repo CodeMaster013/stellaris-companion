@@ -1,6 +1,6 @@
 [project]
 name = "stellaris-companion"
-version = "0.7.1"
+version = "0.8.4"
 description = "AI-powered strategic advisor for Stellaris using Gemini"
 readme = "README.md"
 license = "MIT"
@@ -21,6 +21,9 @@ dependencies = [
     "openai>=1.0.0",
     "anthropic>=0.25.0",
     "httpx>=0.25.0",
+    # Keep macOS PyInstaller bundles on the statically-linked wheel; newer
+    # runner-provided builds can dynamically link mismatched libssl.dylib.
+    "cryptography==46.0.4",
     "python-dotenv>=1.0.0",
     "watchdog>=3.0",
     "fastapi>=0.100.0",
@@ -28,6 +31,11 @@ dependencies = [
     "pydantic>=2.0.0",
     "orjson>=3.9.0",
 ]
+
+[project.scripts]
+stellaris-companion-mcp = "backend.mcp.server:main"
+stellaris-qa-export = "stellaris_save_extractor.qa_export:main"
+stellaris-qa-check = "stellaris_save_extractor.qa_check:main"
 
 [project.optional-dependencies]
 dev = [

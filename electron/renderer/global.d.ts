@@ -18,7 +18,103 @@ import type {
   SessionsResponse,
   StatusResponse,
 } from './hooks/useBackend'
-import type { ChronicleRefreshMode } from './hooks/useSettings'
+import type { ChronicleRefreshMode, ModelRoutingMode } from './hooks/useSettings'
+
+export interface McpRelayHealthResult {
+  ok: boolean
+  message: string
+  durationMs?: number
+  toolCount?: number
+  toolNames?: string[]
+  stderr?: string
+}
+
+export interface McpRelayStatus {
+  serverName: string
+  dbPath: string
+  databaseExists: boolean
+  logDir: string
+  language: string
+  command: string
+  args: string[]
+  env: Record<string, string>
+  snippets: {
+    claudeDesktop: string
+    claudeCode: string
+    codex: string
+    genericJson: string
+  }
+  claudeDesktop: {
+    configPath: string
+    configExists: boolean
+    configured: boolean
+    current?: boolean
+    serverName?: string | null
+    error?: string | null
+    mcpb?: {
+      settingsDir: string
+      configPath: string | null
+      configExists: boolean
+      configured: boolean
+      current?: boolean
+      enabled?: boolean
+      appPath?: string | null
+      error?: string | null
+    }
+  }
+}
+
+export interface McpRelayInstallResult {
+  success: boolean
+  configPath?: string
+  serverName?: string
+  error?: string
+  status?: McpRelayStatus
+}
+
+export type ChroniclePublicationVisibility = 'unlisted' | 'discoverable'
+export type ChronicleModerationStatus = 'not_required' | 'pending' | 'approved' | 'rejected'
+
+export interface ChroniclePublicationReceipt {
+  clientPublicationId: string
+  storyId: string
+  publicUrl: string
+  title: string
+  revision: number
+  visibility: ChroniclePublicationVisibility
+  moderationStatus: ChronicleModerationStatus
+  publishedAt: string
+  updatedAt: string
+}
+
+export interface ChroniclePublicationStatus {
+  state: 'unpublished' | 'published'
+  receipt?: ChroniclePublicationReceipt
+  syncWarning?: string
+}
+
+export interface ChroniclePublicationError {
+  code: string
+  message: string
+  status?: number
+  currentRevision?: number
+}
+
+export type ChroniclePublicationResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: ChroniclePublicationError }
+
+export interface ChroniclePublicationPayload {
+  saveId: string
+  title: string
+  empireName: string
+  language: string
+  visibility: ChroniclePublicationVisibility
+  document: {
+    chapters: ChronicleResponse['chapters']
+    current_era?: NonNullable<ChronicleResponse['current_era']>
+  }
+}
 
 declare global {
   interface Window {
@@ -26,18 +122,34 @@ declare global {
       backend: {
         health: () => Promise<BackendIpcResponse<HealthResponse>>
         diagnostics: () => Promise<BackendIpcResponse<DiagnosticsResponse>>
-        chat: (message: string, sessionKey?: string) => Promise<BackendIpcResponse<ChatResponse>>
+        chat: (
+          message: string,
+          sessionKey?: string,
+          model?: string,
+          modelRoutingMode?: ModelRoutingMode,
+        ) => Promise<BackendIpcResponse<ChatResponse>>
         status: () => Promise<BackendIpcResponse<StatusResponse>>
         sessions: () => Promise<BackendIpcResponse<SessionsResponse>>
         sessionEvents: (sessionId: string, limit?: number) => Promise<BackendIpcResponse<SessionEventsResponse>>
-        recap: (sessionId: string, style?: string) => Promise<BackendIpcResponse<RecapResponse>>
+        recap: (
+          sessionId: string,
+          style?: string,
+          modelRoutingMode?: ModelRoutingMode,
+        ) => Promise<BackendIpcResponse<RecapResponse>>
         chronicle: (
           sessionId: string,
           forceRefresh?: boolean,
           chapterOnly?: boolean,
           refreshMode?: ChronicleRefreshMode,
+          modelRoutingMode?: ModelRoutingMode,
         ) => Promise<BackendIpcResponse<ChronicleResponse>>
-        regenerateChapter: (sessionId: string, chapterNumber: number, confirm?: boolean, regenerationInstructions?: string) => Promise<BackendIpcResponse<RegenerateChapterResponse>>
+        regenerateChapter: (
+          sessionId: string,
+          chapterNumber: number,
+          confirm?: boolean,
+          regenerationInstructions?: string,
+          modelRoutingMode?: ModelRoutingMode,
+        ) => Promise<BackendIpcResponse<RegenerateChapterResponse>>
         endSession: () => Promise<BackendIpcResponse<EndSessionResponse>>
         getChronicleCustom: () => Promise<BackendIpcResponse<ChronicleCustomResponse>>
         setChronicleCustom: (customInstructions: string) => Promise<BackendIpcResponse<ChronicleCustomResponse>>
@@ -60,7 +172,18 @@ declare global {
       copyToClipboard: (text: string) => Promise<{ success: boolean }>
       openExternal: (url: string) => Promise<{ success: boolean }>
       exportChronicle: (html: string, defaultFilename: string) => Promise<{ success: boolean; filePath?: string; error?: string } | null>
+      chroniclePublishing: {
+        publish: (publication: ChroniclePublicationPayload) => Promise<ChroniclePublicationResult<ChroniclePublicationReceipt>>
+        status: (saveId: string) => Promise<ChroniclePublicationResult<ChroniclePublicationStatus>>
+        delete: (saveId: string) => Promise<ChroniclePublicationResult<{ removed: true }>>
+      }
       getBackendLogTail: (opts?: { maxBytes?: number }) => Promise<{ ok: true; data: string } | { ok: false; error: string }>
+      mcpRelay: {
+        status: () => Promise<McpRelayStatus>
+        healthCheck: () => Promise<McpRelayHealthResult>
+        installClaudeDesktop: () => Promise<McpRelayInstallResult>
+        openClaudeConfigFolder: () => Promise<{ success: boolean }>
+      }
       // Backend status events
       onBackendStatus: (callback: (status: BackendStatusEvent) => void) => () => void
       // Updates

@@ -31,11 +31,23 @@ from pydantic import BaseModel, Field
 
 from backend.core.database import GameDatabase
 from backend.core.json_utils import json_dumps
+from backend.core.language import build_language_policy, localized_text, normalize_language
 from backend.core.llm_providers import (
     LLMConfig,
     LLMProvider,
     ProviderType,
     get_provider,
+)
+from backend.core.model_routing import (
+    GEMINI_FLASH_MODEL,
+    classify_model_error,
+    display_model_name,
+    fallback_notice,
+    get_model_unavailable_event,
+    is_model_temporarily_unavailable,
+    mark_model_failure,
+    normalize_model_routing_mode,
+    route_models_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -335,7 +347,9 @@ class ChronicleGenerator:
         self,
         db: GameDatabase,
         api_key: str | None = None,
+        *,
         llm_config: LLMConfig | None = None,
+        model_routing_mode: str | None = None,
     ):
         """Initialize the chronicle generator.
 
@@ -343,6 +357,7 @@ class ChronicleGenerator:
             db: Database instance for persistence.
             api_key: API key for the LLM provider (backward compatibility).
             llm_config: LLM configuration. If None, loads from environment.
+            model_routing_mode: Gemini model routing mode override.
         """
         self.db = db
 
@@ -366,6 +381,12 @@ class ChronicleGenerator:
         # Legacy compatibility
         self.api_key = self._llm_config.api_key
 
+        # Model routing (for Gemini Flash/Flash-Lite fallback)
+        self.model_routing_mode = normalize_model_routing_mode(
+            model_routing_mode or os.environ.get("STELLARIS_MODEL_ROUTING_MODE")
+        )
+        self._model_route_events: list[dict[str, Any]] = []
+
     @property
     def provider(self) -> LLMProvider:
         """Lazy-initialized LLM provider."""
@@ -377,12 +398,6 @@ class ChronicleGenerator:
             self._provider = get_provider(self._llm_config)
         return self._provider
 
-    # Keep client property for backward compatibility but map to provider
-    @property
-    def client(self):
-        """Backward-compatible client property."""
-        return self.provider
-
     def generate_chronicle(
         self,
         session_id: str,
@@ -390,6 +405,8 @@ class ChronicleGenerator:
         force_refresh: bool = False,
         chapter_only: bool = False,
         refresh_mode: str = DEFAULT_CHRONICLE_REFRESH_MODE,
+        model_routing_mode: str | None = None,
+        language: str | None = None,
     ) -> dict[str, Any]:
         """Generate an incremental chronicle for the session.
 
@@ -408,11 +425,16 @@ class ChronicleGenerator:
             # Fallback to session-based chronicle (legacy)
             return self._generate_legacy_chronicle(session_id, force_refresh=force_refresh)
 
+        self._model_route_events = []
+        if model_routing_mode:
+            self.model_routing_mode = normalize_model_routing_mode(model_routing_mode)
+        output_language = normalize_language(language)
         refresh_mode = normalize_chronicle_refresh_mode(refresh_mode)
 
         # Load existing chapters data
-        cached = self.db.get_chronicle_by_save_id(save_id)
+        cached = self.db.get_chronicle_by_save_id(save_id, language=output_language)
         chapters_data = self._load_chapters_data(cached)
+        chapters_data["language"] = output_language
 
         # Load persistent custom instructions for this save
         custom_instructions = self.db.get_chronicle_custom_instructions(save_id)
@@ -420,7 +442,7 @@ class ChronicleGenerator:
         # Get current state
         snapshot_range = self.db.get_snapshot_range_for_save(save_id)
         if not snapshot_range.get("snapshot_count"):
-            return self._empty_chronicle_response()
+            return self._empty_chronicle_response(language=output_language)
 
         current_date = snapshot_range.get("last_game_date")
         current_snapshot_id = snapshot_range.get("last_snapshot_id")
@@ -463,6 +485,7 @@ class ChronicleGenerator:
                     briefing=briefing,
                     trigger=trigger,
                     custom_instructions=custom_instructions,
+                    language=output_language,
                 )
                 if not finalized:
                     break
@@ -568,6 +591,7 @@ class ChronicleGenerator:
                     briefing=briefing,
                     current_date=current_date,
                     custom_instructions=custom_instructions,
+                    language=output_language,
                 )
 
                 if current_era and current_snapshot_id is not None:
@@ -576,6 +600,7 @@ class ChronicleGenerator:
                         "start_snapshot_id": era_start_snapshot_id,
                         "last_snapshot_id": current_snapshot_id,
                         "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "language": output_language,
                         "current_era": current_era,
                     }
                     logger.debug(
@@ -600,6 +625,7 @@ class ChronicleGenerator:
             chapters_json=json_dumps(chapters_data),
             event_count=event_count,
             snapshot_count=snapshot_count,
+            language=output_language,
         )
 
         # Build response
@@ -638,6 +664,7 @@ class ChronicleGenerator:
             "cached": response_cached,
             "event_count": event_count,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model_routing": self._model_routing_response(),
         }
 
     def _should_regenerate_current_era_for_event_growth(
@@ -764,6 +791,8 @@ class ChronicleGenerator:
         *,
         confirm: bool = False,
         regeneration_instructions: str | None = None,
+        model_routing_mode: str | None = None,
+        language: str | None = None,
     ) -> dict[str, Any]:
         """Regenerate a specific finalized chapter.
 
@@ -772,12 +801,16 @@ class ChronicleGenerator:
         """
         if not confirm:
             return {"error": "Must confirm regeneration", "confirm_required": True}
+        self._model_route_events = []
+        if model_routing_mode:
+            self.model_routing_mode = normalize_model_routing_mode(model_routing_mode)
+        output_language = normalize_language(language)
 
         save_id = self.db.get_save_id_for_session(session_id)
         if not save_id:
             raise ValueError(f"No save_id for session: {session_id}")
 
-        cached = self.db.get_chronicle_by_save_id(save_id)
+        cached = self.db.get_chronicle_by_save_id(save_id, language=output_language)
         if not cached:
             raise ValueError(f"No chronicle found for save: {save_id}")
 
@@ -818,6 +851,7 @@ class ChronicleGenerator:
             end_date=chapter["end_date"],
             custom_instructions=custom_instructions,
             regeneration_instructions=regeneration_instructions,
+            language=output_language,
         )
 
         # Update the chapter
@@ -845,12 +879,14 @@ class ChronicleGenerator:
             chapters_json=json_dumps(chapters_data),
             event_count=len(all_events),
             snapshot_count=snapshot_range.get("snapshot_count", 0),
+            language=output_language,
         )
 
         return {
             "chapter": chapter,
             "regenerated": True,
             "stale_chapters": list(range(chapter_number + 1, len(chapters) + 1)),
+            "model_routing": self._model_routing_response(),
         }
 
     def generate_recap(
@@ -859,12 +895,19 @@ class ChronicleGenerator:
         *,
         style: str = "summary",
         max_events: int = 30,
+        model_routing_mode: str | None = None,
+        language: str | None = None,
     ) -> dict[str, Any]:
         """Generate a recap for the session.
 
         Args:
             style: "summary" (deterministic) or "dramatic" (LLM-powered)
         """
+        self._model_route_events = []
+        if model_routing_mode:
+            self.model_routing_mode = normalize_model_routing_mode(model_routing_mode)
+        output_language = normalize_language(language)
+
         if style == "summary":
             from backend.core.reporting import build_session_report_text
 
@@ -876,23 +919,167 @@ class ChronicleGenerator:
 
         if not data["events"]:
             return {
-                "recap": "No events to recap. The story has yet to begin.",
+                "recap": localized_text("no_events_recap", output_language),
                 "style": "dramatic",
                 "events_summarized": 0,
             }
 
-        prompt = self._build_recap_prompt(data)
+        prompt = self._build_recap_prompt(data, language=output_language)
 
-        response = self.provider.generate(
-            prompt=prompt,
-            temperature=1.0,
-            max_tokens=2048,
+        response = self._generate_content_with_routing(
+            contents=prompt,
+            config={"temperature": 1.0, "max_output_tokens": 2048},
+            purpose_label="Chronicle recap",
         )
 
         return {
             "recap": response.text,
             "style": "dramatic",
             "events_summarized": len(data["events"]),
+            "model_routing": self._model_routing_response(),
+        }
+
+    def _generate_content_with_routing(
+        self,
+        *,
+        contents: str,
+        config: dict[str, Any],
+        purpose_label: str,
+    ) -> Any:
+        """Generate content with Gemini Flash-first routing and Flash-Lite fallback.
+
+        For non-Gemini providers, routing is skipped and the provider is used directly.
+        For Gemini, models are tried in priority order with fallback on quota errors.
+        """
+        # Non-Gemini providers: skip model routing, use provider directly
+        if self._llm_config.provider != ProviderType.GOOGLE_GEMINI:
+            temperature = config.get("temperature", 1.0)
+            max_tokens = config.get("max_output_tokens", 4096)
+            response_schema = config.get("response_schema")
+
+            if response_schema:
+                return self.provider.generate_structured(
+                    prompt=contents,
+                    schema=response_schema,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            return self.provider.generate(
+                prompt=contents,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+        # Gemini-specific model routing
+        candidate_models = route_models_for(
+            mode=self.model_routing_mode,
+            purpose="chronicle",
+        )
+        requested_model = candidate_models[0] if candidate_models else GEMINI_FLASH_MODEL
+        route_event = None
+        last_error: Exception | None = None
+
+        for index, candidate_model in enumerate(candidate_models):
+            fallback_model = (
+                candidate_models[index + 1] if index + 1 < len(candidate_models) else None
+            )
+            if fallback_model and is_model_temporarily_unavailable(candidate_model):
+                route_event = get_model_unavailable_event(
+                    requested_model=requested_model,
+                    skipped_model=candidate_model,
+                    final_model=fallback_model,
+                )
+                continue
+
+            try:
+                gemini_config: dict[str, Any] = {
+                    "temperature": config.get("temperature", 1.0),
+                    "max_output_tokens": config.get("max_output_tokens", 4096),
+                }
+                if "response_mime_type" in config:
+                    gemini_config["response_mime_type"] = config["response_mime_type"]
+                if "response_schema" in config:
+                    gemini_config["response_schema"] = config["response_schema"]
+
+                from google.genai import types
+
+                response = self.provider.client.models.generate_content(
+                    model=candidate_model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**gemini_config),
+                )
+                final_event = route_event or (
+                    None
+                    if candidate_model == requested_model
+                    else get_model_unavailable_event(
+                        requested_model=requested_model,
+                        skipped_model=requested_model,
+                        final_model=candidate_model,
+                    )
+                )
+                if final_event:
+                    final_event.final_model = candidate_model
+                    self._model_route_events.append(final_event.to_dict())
+                else:
+                    self._model_route_events.append(
+                        {
+                            "requested_model": requested_model,
+                            "requested_model_display": display_model_name(requested_model),
+                            "attempted_model": candidate_model,
+                            "attempted_model_display": display_model_name(candidate_model),
+                            "final_model": candidate_model,
+                            "final_model_display": display_model_name(candidate_model),
+                            "fallback": False,
+                            "reason": None,
+                            "notice": None,
+                            "error": None,
+                        }
+                    )
+                return response
+            except Exception as exc:
+                last_error = exc
+                failure = classify_model_error(exc)
+                if failure and fallback_model:
+                    logger.warning(
+                        "%s failed on %s; routing via %s: %s",
+                        purpose_label,
+                        display_model_name(candidate_model),
+                        display_model_name(fallback_model),
+                        exc,
+                    )
+                    mark_model_failure(candidate_model, failure)
+                    route_event = get_model_unavailable_event(
+                        requested_model=requested_model,
+                        skipped_model=candidate_model,
+                        final_model=fallback_model,
+                    )
+                    if route_event:
+                        route_event.reason = failure.reason
+                        route_event.error = failure.message[:500]
+                        route_event.notice = fallback_notice(
+                            candidate_model,
+                            fallback_model,
+                            reason=failure.reason,
+                        )
+                    continue
+                raise
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("No Chronicle model was available")
+
+    def _model_routing_response(self) -> dict[str, Any]:
+        events = list(self._model_route_events)
+        last_event = events[-1] if events else None
+        fallback_events = [event for event in events if event.get("fallback")]
+        last_fallback = fallback_events[-1] if fallback_events else None
+        return {
+            "mode": self.model_routing_mode,
+            "model": last_event.get("final_model") if last_event else None,
+            "model_display": last_event.get("final_model_display") if last_event else None,
+            "fallback": bool(fallback_events),
+            "notice": last_fallback.get("notice") if last_fallback else None,
+            "events": events,
         }
 
     # --- Private Methods ---
@@ -1092,6 +1279,7 @@ class ChronicleGenerator:
         briefing: dict[str, Any],
         trigger: str | None,
         custom_instructions: str | None = None,
+        language: str = "en",
     ) -> bool:
         """Generate and finalize a new chapter.
 
@@ -1181,6 +1369,7 @@ class ChronicleGenerator:
             start_date=start_date,
             end_date=end_date,
             custom_instructions=custom_instructions,
+            language=language,
         )
 
         # Add the new chapter
@@ -1219,6 +1408,7 @@ class ChronicleGenerator:
         end_date: str,
         custom_instructions: str | None = None,
         regeneration_instructions: str | None = None,
+        language: str = "en",
     ) -> dict[str, str]:
         """Generate chapter content using Gemini structured output."""
         identity = briefing.get("identity", {})
@@ -1276,11 +1466,19 @@ The player has specifically requested these changes for this regeneration:
 Incorporate this guidance while maintaining narrative consistency.
 """
 
+        language_policy = build_language_policy(
+            language,
+            structured_json=True,
+            user_visible_fields=("title", "epigraph", "sections.text", "attribution", "summary"),
+        )
+
         prompt = f"""You are the Royal Chronicler of {empire_name}.
 
 === CHRONICLER'S VOICE ===
 {voice}
 {custom_section}
+{language_policy}
+
 === PREVIOUS CHAPTERS ===
 {previous_context}
 {diplomatic_section}{geographic_section}
@@ -1309,11 +1507,15 @@ Do NOT fabricate events not in the event list.
 
         response = None
         try:
-            response = self.provider.generate_structured(
-                prompt=prompt,
-                schema=ChapterOutput,
-                temperature=1.0,
-                max_tokens=4096,  # Increased: 500-800 word narrative + JSON overhead
+            response = self._generate_content_with_routing(
+                contents=prompt,
+                config={
+                    "temperature": 1.0,
+                    "max_output_tokens": 4096,
+                    "response_mime_type": "application/json",
+                    "response_schema": ChapterOutput,
+                },
+                purpose_label=f"Chronicle chapter {chapter_number}",
             )
 
             # Parse with Pydantic for validation
@@ -1368,6 +1570,7 @@ Do NOT fabricate events not in the event list.
         briefing: dict[str, Any],
         current_date: str | None,
         custom_instructions: str | None = None,
+        language: str = "en",
     ) -> dict[str, Any] | None:
         """Generate the current era narrative (not finalized)."""
         chapters = chapters_data.get("chapters", [])
@@ -1437,11 +1640,19 @@ Do NOT fabricate events not in the event list.
 {custom_instructions.strip()}
 """
 
+        language_policy = build_language_policy(
+            language,
+            structured_json=True,
+            user_visible_fields=("sections.text", "attribution"),
+        )
+
         prompt = f"""You are the Royal Chronicler of {empire_name}.
 
 === CHRONICLER'S VOICE ===
 {voice}
 {era_custom_section}
+{language_policy}
+
 === PREVIOUS CHAPTERS ===
 {previous_context}
 {diplomatic_section}{geographic_section}
@@ -1464,30 +1675,18 @@ Do NOT give advice. You are a historian, not an advisor.
 
         response = None
         try:
-            response = self.provider.generate_structured(
-                prompt=prompt,
-                schema=CurrentEraOutput,
-                temperature=1.0,
-                max_tokens=1024,
+            response = self._generate_content_with_routing(
+                contents=prompt,
+                config={
+                    "temperature": 1.0,
+                    "max_output_tokens": 1024,
+                    "response_mime_type": "application/json",
+                    "response_schema": CurrentEraOutput,
+                },
+                purpose_label="Chronicle current era",
             )
-        except Exception as primary_error:
-            logger.warning(
-                "Current era generation failed, retrying: %s",
-                primary_error,
-            )
-            try:
-                # Retry with same provider
-                response = self.provider.generate_structured(
-                    prompt=prompt,
-                    schema=CurrentEraOutput,
-                    temperature=1.0,
-                    max_tokens=1024,
-                )
-            except Exception as fallback_error:
-                logger.warning(
-                    "Current era generation retry failed: %s",
-                    fallback_error,
-                )
+        except Exception as error:
+            logger.warning("Current era generation failed: %s", error)
 
         try:
             if response is None or not getattr(response, "text", None):
@@ -1502,7 +1701,7 @@ Do NOT give advice. You are a historian, not an advisor.
                 "events_covered": len(events),
             }
         except Exception:
-            fallback_text = "The current era unfolds...\n\nThe story continues..."
+            fallback_text = localized_text("current_era_fallback", language)
             return {
                 "start_date": era_start_date,
                 "sections": [{"type": "prose", "text": fallback_text, "attribution": ""}],
@@ -1532,17 +1731,18 @@ Do NOT give advice. You are a historian, not an advisor.
 
         return "\n".join(lines)
 
-    def _empty_chronicle_response(self) -> dict[str, Any]:
+    def _empty_chronicle_response(self, *, language: str = "en") -> dict[str, Any]:
         """Return empty chronicle response."""
         return {
             "chapters": [],
             "current_era": None,
             "pending_chapters": 0,
             "message": None,
-            "chronicle": "No events recorded yet. The chronicle awaits the first chapters of history.",
+            "chronicle": localized_text("no_events_chronicle", language),
             "cached": False,
             "event_count": 0,
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "model_routing": self._model_routing_response(),
         }
 
     # --- Legacy Support ---
@@ -1574,11 +1774,10 @@ Do NOT give advice. You are a historian, not an advisor.
         # Build prompt
         prompt = self._build_chronicler_prompt(data)
 
-        # Call LLM
-        response = self.provider.generate(
-            prompt=prompt,
-            temperature=1.0,
-            max_tokens=4096,
+        response = self._generate_content_with_routing(
+            contents=prompt,
+            config={"temperature": 1.0, "max_output_tokens": 4096},
+            purpose_label="Chronicle legacy",
         )
 
         chronicle_text = response.text
@@ -1742,7 +1941,7 @@ End with "The Story Continues..." about the current situation.
         else:
             return "Write with epic gravitas befitting a galactic chronicle."
 
-    def _build_recap_prompt(self, data: dict[str, Any]) -> str:
+    def _build_recap_prompt(self, data: dict[str, Any], *, language: str = "en") -> str:
         """Build a shorter recap prompt for recent events."""
         briefing = data["briefing"]
         identity = briefing.get("identity", {})
@@ -1751,7 +1950,11 @@ End with "The Story Continues..." about the current situation.
         events_text = self._format_events(data["events"])
         state_text = self._summarize_state(briefing)
 
+        language_policy = build_language_policy(language)
+
         return f"""You are the Royal Chronicler of {empire_name}. Write a dramatic "Previously on..." recap.
+
+{language_policy}
 
 {state_text}
 

@@ -13,6 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.core.companion import Companion
 from backend.core.llm_providers import LLMConfig, LLMResponse, ProviderType
+from backend.core.model_routing import (
+    GEMINI_FLASH_LITE_MODEL,
+    GEMINI_FLASH_MODEL,
+    clear_model_state,
+)
 
 
 class _DummyProvider:
@@ -80,6 +85,78 @@ def test_apply_precomputed_briefing_uses_metadata_for_dlc_prompt_context(compani
     assert "[INTERNAL CONTEXT - never mention this to the user]" in companion.system_prompt
     assert "Active DLCs: Utopia, Overlord" in companion.system_prompt
     assert "Nemesis (MISSING" in companion.system_prompt
+
+
+def test_apply_precomputed_briefing_lists_nomads_unavailable_features(companion):
+    metadata = {
+        "version": "Pegasus v4.4.3",
+        "required_dlcs": ["Utopia"],
+        "missing_dlcs": ["Nomads"],
+    }
+    briefing_json = json.dumps({"meta": {"date": "2400.01.01", "version": "Pegasus v4.4.3"}})
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2400.01.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata=metadata,
+    )
+
+    assert "Nomads (MISSING" in companion.system_prompt
+    assert "unavailable: Nomadic Empires and Arkships" in companion.system_prompt
+    assert "Waystations and Waylines" in companion.system_prompt
+    assert "Operational Reserves" in companion.system_prompt
+
+
+@pytest.mark.parametrize(
+    ("version", "included", "excluded"),
+    [
+        (
+            "Pegasus v4.4.4",
+            ["uses a 3:1 rule rather than one-to-one conversion"],
+            ["Operational Reserves track Energy and Minerals one-to-one"],
+        ),
+        (
+            "Pegasus v4.4.5",
+            [
+                "Operational Reserves track Energy and Minerals one-to-one",
+                "Resource Abundance slider",
+            ],
+            ["Automated Science Ships return normally after exploring Astral Rifts"],
+        ),
+        (
+            "Pegasus v4.4.6",
+            [
+                "Operational Reserves track Energy and Minerals one-to-one",
+                "Automated Science Ships return normally after exploring Astral Rifts",
+            ],
+            [],
+        ),
+    ],
+)
+def test_advisor_prompt_uses_exact_pegasus_patch_overlays(companion, version, included, excluded):
+    briefing_json = json.dumps({"meta": {"date": "2200.01.01", "version": version}})
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2200.01.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata={
+            "version": version,
+            "required_dlcs": ["Nomads"],
+            "missing_dlcs": [],
+        },
+    )
+
+    for fact in included:
+        assert fact in companion.system_prompt
+    for fact in excluded:
+        assert fact not in companion.system_prompt
+    assert 'A later fact labeled "Override"' in companion.system_prompt
 
 
 def test_build_game_context_prefers_metadata_missing_dlcs_without_extractor(companion):
@@ -274,4 +351,82 @@ def test_ask_precomputed_injects_policy_block_but_uses_normal_advisor_path(compa
     assert "NAVAL CAPACITY RESPONSE POLICY:" in captured["system_prompt"]
     assert "Response state: estimated." in captured["system_prompt"]
     assert "cannot confirm whether the empire is over naval cap" in captured["system_prompt"]
+    assert companion.get_call_stats()["model"] == "gemini-3.1-flash-lite-preview"
     assert companion.get_call_stats()["tools_used"] == ["ask_precomputed_no_tools"]
+
+
+def test_ask_precomputed_allows_model_override(companion):
+    briefing_json = json.dumps({"meta": {"date": "2230.07.01", "version": "Corvus v4.2.4"}})
+    captured = {}
+
+    def _fake_generate(self, prompt, **kwargs):
+        captured["model"] = self.config.model
+        return LLMResponse(text="A different model answered this.", model=self.config.model)
+
+    companion._provider.generate = _fake_generate.__get__(companion._provider)
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2230.07.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata={"version": "Corvus v4.2.4", "required_dlcs": [], "missing_dlcs": []},
+    )
+
+    answer, _elapsed = companion.ask_precomputed(
+        question="Summarize our position.",
+        session_key="override-model",
+        model_name="gemma-4-31b-it",
+    )
+
+    assert answer == "A different model answered this."
+    assert captured["model"] == "gemma-4-31b-it"
+    assert companion.get_call_stats()["model"] == "gemma-4-31b-it"
+
+
+def test_ask_precomputed_routes_to_flash_lite_when_flash_hits_quota(companion):
+    clear_model_state()
+    briefing_json = json.dumps({"meta": {"date": "2230.07.01", "version": "Corvus v4.2.4"}})
+    calls: list[str] = []
+
+    def _fake_generate(self, prompt, **kwargs):
+        calls.append(self.config.model)
+        if self.config.model == GEMINI_FLASH_MODEL:
+            raise RuntimeError(
+                "429 RESOURCE_EXHAUSTED Quota exceeded for quotaId': "
+                "'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', quotaValue': '5'. "
+                "Please retry in 42s"
+            )
+        return LLMResponse(text="Gemini Flash-Lite answered after Flash hit quota.", model=self.config.model)
+
+    companion._provider.generate = _fake_generate.__get__(companion._provider)
+
+    companion.apply_precomputed_briefing(
+        save_path=None,
+        briefing_json=briefing_json,
+        game_date="2230.07.01",
+        identity=_identity(),
+        situation=_situation(),
+        metadata={"version": "Corvus v4.2.4", "required_dlcs": [], "missing_dlcs": []},
+    )
+
+    try:
+        answer, _elapsed = companion.ask_precomputed(
+            question="Summarize our position.",
+            session_key="route-on-quota",
+            model_routing_mode="quality_first",
+        )
+    finally:
+        clear_model_state()
+
+    stats = companion.get_call_stats()
+    assert answer == "Gemini Flash-Lite answered after Flash hit quota."
+    assert calls == [GEMINI_FLASH_MODEL, GEMINI_FLASH_LITE_MODEL]
+    assert stats["model"] == GEMINI_FLASH_LITE_MODEL
+    assert stats["model_display"] == "Gemini Flash-Lite"
+    assert stats["routing"]["fallback"] is True
+    assert stats["routing"]["final_model_display"] == "Gemini Flash-Lite"
+    assert (
+        stats["routing"]["notice"] == "Gemini Flash is cooling down. Routing via Gemini Flash-Lite."
+    )

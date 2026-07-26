@@ -1,87 +1,36 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useTranslation } from 'react-i18next'
 import ChatMessage from '../components/ChatMessage'
 import ChatInput from '../components/ChatInput'
 import VirtualChatList from '../components/VirtualChatList'
 import AdvisorInfoPanel from '../components/AdvisorInfoPanel'
 import { useBackend, ChatResponse, EmpireType } from '../hooks/useBackend'
+import type { ModelRoutingMode } from '../hooks/useSettings'
 import { HUDHeader } from '../components/hud/HUDText'
 import { HUDPanel } from '../components/hud/HUDPanel'
 import { FolderIconG } from '../components/icons/FolderIcon'
 
-// Themed loading messages for different empire types
-const LOADING_MESSAGES = {
-  universal: [
-    'Consulting the Curators',
-    'Surveying the situation',
-    'Analyzing sensor data',
-    'Processing anomaly',
-    'Compiling situation report',
-    'Running simulations',
-    'Accessing the archives',
-    'Cross-referencing star charts',
-    // Easter eggs
-    'Waiting for end-game lag to clear',
-    'Checking if the Fallen Empire noticed',
-    'Consulting the Shroud',
-    'What was, will be',
-    // Galactic Filing Cabinet
-    'Locating the correct folder...',
-    'Filing this under "Urgent"...',
-    'Pulling your file...',
-    'Cross-referencing your records...',
-    'Please hold...',
-    'Transferring you now...',
-    'Consulting a supervisor...',
-  ],
-  machine: [
-    'Processing directive',
-    'The network ponders',
-    'Calculating optimal outcome',
-    'Querying subroutines',
-  ],
-  hive_mind: [
-    'The collective considers',
-    'Syncing with the overmind',
-    'Assimilating information',
-    'Consensus forming',
-  ],
+interface LoadingMessagePools {
+  universal: string[]
+  machine: string[]
+  hiveMind: string[]
 }
 
-function getLoadingMessage(empireType: EmpireType | null): string {
-  const pool = [...LOADING_MESSAGES.universal]
+interface SuggestionPools {
+  strategic: string[]
+  tactical: string[]
+  wildcards: string[]
+}
+
+function getLoadingMessage(empireType: EmpireType | null, messages: LoadingMessagePools): string {
+  const pool = [...messages.universal]
   if (empireType === 'machine') {
-    pool.push(...LOADING_MESSAGES.machine)
+    pool.push(...messages.machine)
   } else if (empireType === 'hive_mind') {
-    pool.push(...LOADING_MESSAGES.hive_mind)
+    pool.push(...messages.hiveMind)
   }
   return pool[Math.floor(Math.random() * pool.length)]
-}
-
-// Suggestion pools for the welcome screen
-const SUGGESTIONS = {
-  strategic: [
-    'What should I be researching?',
-    'Am I falling behind?',
-    'What am I probably neglecting?',
-    'What should a ruler at this stage be thinking about?',
-    'How does our empire compare to the competition?',
-    "What's the biggest risk we're not preparing for?",
-  ],
-  tactical: [
-    'Why is my economy in the red?',
-    'What should I be building on my planets?',
-    'Why does everyone hate us?',
-    'Could we win a war right now?',
-    'Can our navy hold its own?',
-    'Where are we strategically vulnerable?',
-  ],
-  wildcards: [
-    'Roast my empire',
-    'Explain my empire like I just took the throne',
-    'Give me a state of the galaxy address',
-    'What would our rivals say about us?',
-  ],
 }
 
 // Pick random items from an array
@@ -91,13 +40,13 @@ function pickRandom<T>(arr: T[], count: number): T[] {
 }
 
 // Generate a set of suggestions: 2 strategic, 2 tactical, 1 wildcard
-function generateSuggestions(): string[] {
+function generateSuggestions(pools: SuggestionPools, roastSuggestion: string): string[] {
   const picks = [
-    ...pickRandom(SUGGESTIONS.strategic, 2),
-    ...pickRandom(SUGGESTIONS.tactical, 2),
-    ...pickRandom(SUGGESTIONS.wildcards.filter(w => w !== 'Roast my empire'), 1),
+    ...pickRandom(pools.strategic, 2),
+    ...pickRandom(pools.tactical, 2),
+    ...pickRandom(pools.wildcards.filter(w => w !== roastSuggestion), 1),
   ].sort(() => Math.random() - 0.5) // Shuffle the final order
-  picks.push('Roast my empire') // Always last
+  picks.push(roastSuggestion) // Always last
   return picks
 }
 
@@ -139,6 +88,9 @@ interface Message {
   content: string
   timestamp: Date
   responseTimeMs?: number
+  model?: string
+  modelDisplay?: string
+  modelRouting?: ChatResponse['model_routing']
   isError?: boolean
 }
 
@@ -171,6 +123,7 @@ function buildRecentTurnsForReport(messages: Message[], assistantIndex: number):
  */
 interface ChatPageProps {
   isActive?: boolean
+  modelRoutingMode?: ModelRoutingMode
   onReportLlmIssue?: (llm: {
     lastPrompt?: string
     lastResponse?: string
@@ -182,8 +135,10 @@ interface ChatPageProps {
 
 function ChatPage({
   isActive = true,
+  modelRoutingMode,
   onReportLlmIssue,
 }: ChatPageProps) {
+  const { t } = useTranslation()
   const backend = useBackend()
   const [messages, setMessages] = useState<Message[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -198,13 +153,33 @@ function ChatPage({
   const [empireCivics, setEmpireCivics] = useState<string[]>([])
   const [empireAuthority, setEmpireAuthority] = useState<string | null>(null)
   const [empireOrigin, setEmpireOrigin] = useState<string | null>(null)
-  const [loadingMessage, setLoadingMessage] = useState<string>('Consulting the Curators')
-  const [suggestions, setSuggestions] = useState<string[]>(() => generateSuggestions())
+  const [loadingMessage, setLoadingMessage] = useState<string>('')
+  const [suggestions, setSuggestions] = useState<string[]>([])
   const [advisorPanelOpen, setAdvisorPanelOpen] = useState(false)
   const [isWelcomeCompact, setIsWelcomeCompact] = useState<boolean>(() => isCompactWelcomeViewport())
+  const [suggestionKey, setSuggestionKey] = useState(0)
+
+  const loadingMessages = useMemo<LoadingMessagePools>(() => ({
+    universal: t('chat.loading.universal', { returnObjects: true }) as string[],
+    machine: t('chat.loading.machine', { returnObjects: true }) as string[],
+    hiveMind: t('chat.loading.hiveMind', { returnObjects: true }) as string[],
+  }), [t])
+
+  const suggestionPools = useMemo<SuggestionPools>(() => ({
+    strategic: t('chat.suggestions.strategic', { returnObjects: true }) as string[],
+    tactical: t('chat.suggestions.tactical', { returnObjects: true }) as string[],
+    wildcards: t('chat.suggestions.wildcards', { returnObjects: true }) as string[],
+  }), [t])
+
+  const roastSuggestion = t('chat.suggestions.roast')
+
+  useEffect(() => {
+    setLoadingMessage(getLoadingMessage(empireType, loadingMessages))
+    setSuggestions(generateSuggestions(suggestionPools, roastSuggestion))
+    setSuggestionKey(k => k + 1)
+  }, [empireType, loadingMessages, roastSuggestion, suggestionPools])
 
   // Re-animate suggestions when tab becomes active again
-  const [suggestionKey, setSuggestionKey] = useState(0)
   const wasActiveRef = useRef(isActive)
   useEffect(() => {
     if (isActive && !wasActiveRef.current) {
@@ -263,10 +238,10 @@ function ChatPage({
   const visibleSuggestions = useMemo(() => {
     if (!isWelcomeCompact) return suggestions
 
-    const roast = suggestions.find((s) => s === 'Roast my empire')
-    const base = suggestions.filter((s) => s !== 'Roast my empire').slice(0, 3)
+    const roast = suggestions.find((s) => s === roastSuggestion)
+    const base = suggestions.filter((s) => s !== roastSuggestion).slice(0, 3)
     return roast ? [...base, roast] : suggestions.slice(0, 4)
-  }, [isWelcomeCompact, suggestions])
+  }, [isWelcomeCompact, roastSuggestion, suggestions])
 
   const handleSend = useCallback(async (text: string) => {
     // Add user message
@@ -278,11 +253,11 @@ function ChatPage({
     }
     setMessages(prev => capMessages([...prev, userMessage]))
     setScrollToBottomSignal(v => v + 1)
-    setLoadingMessage(getLoadingMessage(empireType))
+    setLoadingMessage(getLoadingMessage(empireType, loadingMessages))
     setIsLoading(true)
 
     try {
-      const result = await backend.chat(text, sessionKey)
+      const result = await backend.chat(text, sessionKey, undefined, modelRoutingMode)
 
       // Only update state if component is still mounted
       if (!isMountedRef.current) return
@@ -293,7 +268,9 @@ function ChatPage({
           const retryMessage: Message = {
             id: `retry-${Date.now()}`,
             role: 'assistant',
-            content: `The advisor is still analyzing your save file. Please try again in ${Math.ceil(result.retryAfterMs / 1000)} seconds.`,
+            content: t('chat.errors.briefingNotReady', {
+              seconds: Math.ceil(result.retryAfterMs / 1000),
+            }),
             timestamp: new Date(),
             isError: true,
           }
@@ -318,6 +295,9 @@ function ChatPage({
           content: chatResponse.text,
           timestamp: new Date(),
           responseTimeMs: chatResponse.response_time_ms,
+          model: chatResponse.model,
+          modelDisplay: chatResponse.model_display,
+          modelRouting: chatResponse.model_routing,
         }
         setMessages(prev => capMessages([...prev, assistantMessage]))
       }
@@ -329,7 +309,7 @@ function ChatPage({
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
         role: 'assistant',
-        content: err instanceof Error ? err.message : 'An unexpected error occurred',
+        content: err instanceof Error ? err.message : t('chat.errors.unexpected'),
         timestamp: new Date(),
         isError: true,
       }
@@ -339,16 +319,16 @@ function ChatPage({
         setIsLoading(false)
       }
     }
-  }, [backend, sessionKey, empireType])
+  }, [backend, sessionKey, empireType, modelRoutingMode, loadingMessages, t])
 
   const handleNewChat = useCallback(() => {
     if (isLoading) return
     setMessages([])
     setSessionKey(createSessionKey())
-    setSuggestions(generateSuggestions())
+    setSuggestions(generateSuggestions(suggestionPools, roastSuggestion))
     setSuggestionKey(k => k + 1)
     setScrollToBottomSignal(v => v + 1)
-  }, [isLoading])
+  }, [isLoading, roastSuggestion, suggestionPools])
 
   const items = useMemo(() => {
     const base = messages.map((message, idx) => ({
@@ -361,6 +341,8 @@ function ChatPage({
           content={message.content}
           timestamp={message.timestamp}
           responseTimeMs={message.responseTimeMs}
+          modelDisplay={message.modelDisplay}
+          modelRouting={message.modelRouting}
           isError={message.isError}
           onReport={
             onReportLlmIssue && message.role === 'assistant' && !message.isError
@@ -371,7 +353,7 @@ function ChatPage({
                   lastResponse: truncateForReport(message.content),
                   recentTurns: buildRecentTurnsForReport(messages, idx),
                   responseTimeMs: message.responseTimeMs,
-                  model: 'gemini-3-flash-preview',
+                  model: message.model,
                 })
               }
               : undefined
@@ -447,7 +429,7 @@ function ChatPage({
                   size={isWelcomeCompact ? 'lg' : 'xl'}
                   className={`${isWelcomeCompact ? 'tracking-[0.12em]' : 'tracking-[0.2em]'} text-accent-cyan text-glow`}
                 >
-                  Galactic Helpdesk
+                  {t('chat.welcome.title')}
                 </HUDHeader>
                 <motion.div
                   className="absolute -bottom-2 inset-x-0 mx-auto w-1/2 h-px bg-gradient-to-r from-transparent via-accent-cyan/50 to-transparent"
@@ -462,8 +444,8 @@ function ChatPage({
                 variants={welcomeItem}
               >
                 {precomputeReady
-                  ? 'YOUR FILE IS OPEN // SUBMIT YOUR REQUEST'
-                  : <>INITIALIZING // SCANNING EMPIRE DATA<span className="animate-pulse-text ml-1">▍</span></>}
+                  ? t('chat.welcome.ready', { defaultValue: 'YOUR FILE IS OPEN // SUBMIT YOUR REQUEST' })
+                  : <>{t('chat.welcome.scanning', { defaultValue: 'INITIALIZING // SCANNING EMPIRE DATA' })}<span className="animate-pulse-text ml-1">▍</span></>}
               </motion.p>
             </div>
 
@@ -480,7 +462,7 @@ function ChatPage({
                   >
                     <HUDPanel
                       className={`w-full ${isWelcomeCompact ? 'max-h-[42vh]' : ''}`}
-                      title="Suggested Inquiries"
+                      title={t('chat.welcome.suggested', { defaultValue: 'Suggested Inquiries' })}
                       variant="primary"
                     >
                       <div className={isWelcomeCompact ? 'max-h-[30vh] overflow-y-auto custom-scrollbar pr-1' : ''}>
@@ -527,7 +509,7 @@ function ChatPage({
                       <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-accent-cyan shadow-glow-indicator" />
                     </span>
                     <span className="font-mono text-xs text-accent-cyan/70 tracking-wider animate-pulse-text">
-                      Scanning empire data...
+                      {t('chat.welcome.scanningShort', { defaultValue: 'Scanning empire data...' })}
                     </span>
                   </motion.div>
                 )}
@@ -548,7 +530,7 @@ function ChatPage({
                   : 'text-accent-cyan/80 hover:text-accent-cyan hover:border-accent-cyan/60 hover:bg-accent-cyan/10'
               }`}
             >
-              New Chat
+              {t('chat.newChat', { defaultValue: 'New Chat' })}
             </button>
           </div>
 

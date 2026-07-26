@@ -88,9 +88,21 @@ jobs:
           cache-dependency-path: 'pyproject.toml'
 
       - name: Install Python Dependencies
+        shell: bash
         run: |
-          pip install .
-          pip install pyinstaller
+          python -m venv .venv-build
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PYTHON_BIN="$PWD/.venv-build/Scripts/python.exe"
+            VENV_BIN="$PWD/.venv-build/Scripts"
+          else
+            PYTHON_BIN="$PWD/.venv-build/bin/python"
+            VENV_BIN="$PWD/.venv-build/bin"
+          fi
+          "$PYTHON_BIN" -m pip install --upgrade pip
+          "$PYTHON_BIN" -m pip install .
+          "$PYTHON_BIN" -m pip install pyinstaller
+          echo "PYTHON_BIN=$PYTHON_BIN" >> "$GITHUB_ENV"
+          echo "$VENV_BIN" >> "$GITHUB_PATH"
 
       - name: Build Python Backend
         shell: bash
@@ -119,6 +131,10 @@ jobs:
           VITE_ISSUES_URL: ${{ vars.VITE_ISSUES_URL }}
           VITE_REPORT_ENDPOINT: ${{ vars.VITE_REPORT_ENDPOINT }}
         run: npm run build
+
+      - name: Package Claude Desktop MCPB
+        working-directory: electron
+        run: npm run build:mcpb
 
       - name: CI smoke check (inputs for packaging)
         shell: bash
@@ -171,6 +187,13 @@ jobs:
           cd electron
           npx electron-builder ${{ matrix.electron_args }} --publish always
 
+      - name: Publish Claude Desktop MCPB
+        if: ${{ matrix.name == 'linux-x64' && startsWith(github.ref, 'refs/tags/') }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: electron/dist/mcpb/*.mcpb
+          fail_on_unmatched_files: true
+
       - name: Fetch notarization log on failure
         if: failure() && startsWith(matrix.name, 'mac')
         env:
@@ -209,11 +232,27 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger promo site rebuild
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Synchronize promo site release facts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git clone --depth 1 https://x-access-token:${{ secrets.PROMO_SITE_TOKEN }}@github.com/gitmaan/stellaris-companion-site.git /tmp/site
           cd /tmp/site
+          npm ci
+          npm run release:sync -- --tag "${{ github.ref_name }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit --allow-empty -m "chore: rebuild for ${{ github.ref_name }}"
+          git add \
+            src/data/product-facts.json \
+            public/.well-known/product-facts.json \
+            public/.well-known/agent-skills/index.json
+          if git diff --cached --quiet; then
+            git commit --allow-empty -m "chore: rebuild for ${{ github.ref_name }}"
+          else
+            git commit -m "chore: sync release facts for ${{ github.ref_name }}"
+          fi
           git push

@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .fleet_classification import classify_owned_fleet
+
 
 @dataclass
 class ValidationResult:
@@ -459,6 +461,17 @@ class ExtractionValidator:
                 )
             return result
 
+        # Use the parsed raw fleet entries for categorization. The legacy
+        # ``station=yes`` marker is not authoritative in newer saves, where
+        # ``ship_class`` distinguishes mobile military fleets from starbases.
+        raw_fleets = self.extractor._get_fleets_cached()
+        if not isinstance(raw_fleets, dict) or not raw_fleets:
+            result.add_warning(
+                "fleet_parse_missing",
+                "Could not parse raw fleet entries for fleet validation",
+            )
+            return result
+
         # Check 1: Triangulation - owned_fleets count vs extraction
         total_owned = len(owned_fleet_ids)
         extracted_military = extracted.get("military_fleet_count", 0)
@@ -496,17 +509,14 @@ class ExtractionValidator:
             else:
                 result.add_pass()
 
-        # Check 3: Accuracy - verify each extracted military fleet is correctly categorized
-        # by checking against raw save data (no sampling)
+        # Check 3: Accuracy - verify each extracted military fleet is correctly
+        # categorized from the parsed raw save data (no sampling).
         extracted_fleet_ids = set(f.get("id", "unknown") for f in military_fleets)
 
         for fleet in military_fleets:
             fleet_id = fleet.get("id", "unknown")
-
-            # Find this fleet in raw save
-            pattern = rf"\n\t{fleet_id}=\n\t\{{"
-            match = re.search(pattern, fleet_section)
-            if not match:
+            raw_fleet = raw_fleets.get(str(fleet_id))
+            if not isinstance(raw_fleet, dict):
                 result.add_issue(
                     "existence",
                     f"Extracted military fleet {fleet_id} not found in raw fleet section",
@@ -515,26 +525,17 @@ class ExtractionValidator:
                 )
                 continue
 
-            block = fleet_section[match.start() : match.start() + 2500]
-
-            # Verify it's NOT a starbase
-            if "station=yes" in block:
+            raw_kind = classify_owned_fleet(raw_fleet)
+            if raw_kind != "military":
                 result.add_issue(
                     "categorization",
-                    f"Fleet {fleet_id} has station=yes but is in military_fleets",
-                    details={"fleet_id": fleet_id},
-                    fix_suggestion="Check station=yes detection in _analyze_player_fleets",
-                )
-            else:
-                result.add_pass()
-
-            # Verify it's NOT civilian
-            if "civilian=yes" in block:
-                result.add_issue(
-                    "categorization",
-                    f"Fleet {fleet_id} has civilian=yes but is in military_fleets",
-                    details={"fleet_id": fleet_id},
-                    fix_suggestion="Check civilian=yes detection in _analyze_player_fleets",
+                    f"Fleet {fleet_id} is classified as {raw_kind} but is in military_fleets",
+                    details={
+                        "fleet_id": fleet_id,
+                        "raw_classification": raw_kind,
+                        "ship_class": raw_fleet.get("ship_class"),
+                    },
+                    fix_suggestion="Check shared fleet classification logic",
                 )
             else:
                 result.add_pass()
@@ -545,21 +546,16 @@ class ExtractionValidator:
         missed_military_fleets = []
 
         for fid in owned_fleet_ids:
-            pattern = rf"\n\t{fid}=\n\t\{{"
-            match = re.search(pattern, fleet_section)
-            if not match:
+            raw_fleet = raw_fleets.get(str(fid))
+            if not isinstance(raw_fleet, dict):
                 continue
 
-            block = fleet_section[match.start() : match.start() + 2500]
+            try:
+                mp = float(raw_fleet.get("military_power", 0) or 0)
+            except (ValueError, TypeError):
+                mp = 0.0
 
-            is_station = "station=yes" in block
-            is_civilian = "civilian=yes" in block
-
-            mp_match = re.search(r"military_power=([\d.]+)", block)
-            mp = float(mp_match.group(1)) if mp_match else 0.0
-
-            # Same criteria as extraction: not station, not civilian, power > 100
-            if not is_station and not is_civilian and mp > 100:
+            if classify_owned_fleet(raw_fleet) == "military":
                 military_in_raw += 1
                 # Check if we captured this fleet
                 if fid not in extracted_fleet_ids:
@@ -857,8 +853,21 @@ class ExtractionValidator:
             else:
                 result.add_pass()
 
-        # Check 5: Essential resources are present
-        essential_resources = ["energy", "minerals", "food", "alloys", "consumer_goods"]
+        # Check 5: Essential resources are present. Gestalt economies do not use
+        # the standard Consumer Goods loop, and Machine empires do not require
+        # Food unless their particular population mix creates that demand.
+        try:
+            identity = self.extractor.get_empire_identity()
+        except Exception:
+            identity = {}
+        is_machine = isinstance(identity, dict) and identity.get("is_machine") is True
+        is_hive = isinstance(identity, dict) and identity.get("is_hive_mind") is True
+
+        essential_resources = ["energy", "minerals", "alloys"]
+        if not is_machine:
+            essential_resources.append("food")
+        if not is_machine and not is_hive:
+            essential_resources.append("consumer_goods")
 
         for resource in essential_resources:
             if resource not in stockpiles and resource not in net_monthly:

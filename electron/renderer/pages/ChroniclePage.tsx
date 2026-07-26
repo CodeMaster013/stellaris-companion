@@ -1,14 +1,18 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
+import { useTranslation } from 'react-i18next'
 import ChronicleChapterList from '../components/ChronicleChapterList'
 import ChronicleContent from '../components/ChronicleContent'
 import ChronicleInfoPanel from '../components/ChronicleInfoPanel'
+import ChroniclePublishDialog from '../components/ChroniclePublishDialog'
 import { useBackend, ChronicleResponse } from '../hooks/useBackend'
 import { generateChronicleHtml } from '../lib/chronicleExport'
 import {
   DEFAULT_CHRONICLE_REFRESH_MODE,
   type ChronicleRefreshMode,
+  type ModelRoutingMode,
 } from '../hooks/useSettings'
+import { HUDMicro } from '../components/hud/HUDText'
 
 interface SaveInfo {
   save_id: string
@@ -55,12 +59,15 @@ function isDocumentVisible(): boolean {
 interface ChroniclePageProps {
   isActive?: boolean
   refreshMode?: ChronicleRefreshMode
+  modelRoutingMode?: ModelRoutingMode
 }
 
 function ChroniclePage({
   isActive = true,
   refreshMode = DEFAULT_CHRONICLE_REFRESH_MODE,
+  modelRoutingMode,
 }: ChroniclePageProps) {
+  const { t } = useTranslation()
   const backend = useBackend()
   const isMountedRef = useRef(true)
 
@@ -102,6 +109,7 @@ function ChroniclePage({
 
   // Narrator panel state
   const [narratorPanelOpen, setNarratorPanelOpen] = useState(false)
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false)
 
   // Sidebar collapse state
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
@@ -117,6 +125,8 @@ function ChroniclePage({
   const queuedForceRefreshRef = useRef(false)
   const chronicleRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastAutoSavesRefreshAtRef = useRef(0)
+  const autoSavesRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastFocusChronicleRefreshAtRef = useRef(0)
   const lastSeenIngestionUpdatedAtRef = useRef<number | null>(null)
   const didInitChapterSelectionRef = useRef(false)
   const pendingVisibleChronicleRefreshRef = useRef(false)
@@ -191,7 +201,7 @@ function ChroniclePage({
     const session = latestSessionBySaveId.get(selectedSaveId)
 
     if (!session) {
-      setError('No session found for this save')
+      setError(t('chronicle.page.noSession'))
       return
     }
 
@@ -229,6 +239,7 @@ function ChroniclePage({
         forceRefresh,
         chapterOnly,
         refreshMode,
+        modelRoutingMode,
       )
 
       if (!isMountedRef.current) return
@@ -284,7 +295,15 @@ function ChroniclePage({
         }
       }
     }
-  }, [backend, latestSessionBySaveId, refreshMode, selectedSaveId, totalSnapshotsBySaveId])
+  }, [
+    backend,
+    latestSessionBySaveId,
+    modelRoutingMode,
+    refreshMode,
+    selectedSaveId,
+    t,
+    totalSnapshotsBySaveId,
+  ])
 
   const finalizePendingChaptersHidden = useCallback(async () => {
     if (isDocumentVisible()) return
@@ -337,8 +356,26 @@ function ChroniclePage({
         clearTimeout(chronicleRetryTimerRef.current)
         chronicleRetryTimerRef.current = null
       }
+      if (autoSavesRefreshTimerRef.current) {
+        clearTimeout(autoSavesRefreshTimerRef.current)
+        autoSavesRefreshTimerRef.current = null
+      }
     }
   }, [loadSaves])
+
+  const refreshSessionsAfterIngestion = useCallback(() => {
+    autoSavesRefreshTimerRef.current = null
+    if (!isMountedRef.current) return
+
+    lastAutoSavesRefreshAtRef.current = Date.now()
+    if (!isDocumentVisible()) {
+      pendingVisibleChronicleRefreshRef.current = true
+      void finalizePendingChaptersHidden()
+      return
+    }
+
+    void loadSaves({ silent: true })
+  }, [finalizePendingChaptersHidden, loadSaves])
 
   // Refresh sessions when backend connects or ingestion advances so chronicle
   // updates while gameplay continues in the background.
@@ -372,16 +409,18 @@ function ChroniclePage({
       if (!shouldRefresh) return
 
       const now = Date.now()
-      if (now - lastAutoSavesRefreshAtRef.current < 4000) return
-      lastAutoSavesRefreshAtRef.current = now
-
-      if (!isDocumentVisible()) {
-        pendingVisibleChronicleRefreshRef.current = true
-        void finalizePendingChaptersHidden()
+      const throttleRemainingMs = 4000 - (now - lastAutoSavesRefreshAtRef.current)
+      if (throttleRemainingMs > 0) {
+        if (!autoSavesRefreshTimerRef.current) {
+          autoSavesRefreshTimerRef.current = setTimeout(
+            refreshSessionsAfterIngestion,
+            throttleRemainingMs,
+          )
+        }
         return
       }
 
-      void loadSaves({ silent: true })
+      refreshSessionsAfterIngestion()
     })
 
     return () => {
@@ -392,6 +431,7 @@ function ChroniclePage({
     finalizePendingChaptersHidden,
     latestSessionBySaveId,
     loadSaves,
+    refreshSessionsAfterIngestion,
     selectedSaveId,
   ])
 
@@ -446,10 +486,19 @@ function ChroniclePage({
   }, [isActive, refreshVisibleChronicleAfterResume])
 
   // When the user returns to the app, run one visible refresh so current era
-  // can advance once meaningful new events have accumulated.
+  // can advance and external Chronicle edits saved through MCP are picked up.
   useEffect(() => {
     const handleVisible = () => {
+      const hadPendingRefresh = pendingVisibleChronicleRefreshRef.current
       processPendingVisibleChronicleRefresh()
+      if (hadPendingRefresh) return
+      if (!isActive) return
+      if (!isDocumentVisible()) return
+
+      const now = Date.now()
+      if (now - lastFocusChronicleRefreshAtRef.current < 2000) return
+      lastFocusChronicleRefreshAtRef.current = now
+      void refreshVisibleChronicleAfterResume()
     }
 
     document.addEventListener('visibilitychange', handleVisible)
@@ -458,7 +507,7 @@ function ChroniclePage({
       document.removeEventListener('visibilitychange', handleVisible)
       window.removeEventListener('focus', handleVisible)
     }
-  }, [processPendingVisibleChronicleRefresh])
+  }, [isActive, processPendingVisibleChronicleRefresh, refreshVisibleChronicleAfterResume])
 
   useEffect(() => {
     processPendingVisibleChronicleRefresh()
@@ -574,7 +623,13 @@ function ChroniclePage({
       return
     }
 
-    const result = await backend.regenerateChapter(session.id, chapterNumber, true, regenerationInstructions)
+    const result = await backend.regenerateChapter(
+      session.id,
+      chapterNumber,
+      true,
+      regenerationInstructions,
+      modelRoutingMode,
+    )
 
     if (!isMountedRef.current) return
 
@@ -585,7 +640,13 @@ function ChroniclePage({
     }
 
     // Silently reload chronicle data without showing loading spinner
-    const chronicleResult = await backend.chronicle(session.id, false, false, refreshMode)
+    const chronicleResult = await backend.chronicle(
+      session.id,
+      false,
+      false,
+      refreshMode,
+      modelRoutingMode,
+    )
     if (!isMountedRef.current) return
 
     if (chronicleResult.data) {
@@ -598,7 +659,7 @@ function ChroniclePage({
     }
 
     setRegeneratingChapter(null)
-  }, [backend, selectedSaveId, confirmRegen, latestSessionBySaveId, refreshMode])
+  }, [backend, selectedSaveId, confirmRegen, latestSessionBySaveId, modelRoutingMode, refreshMode])
 
   // Cancel regeneration confirmation
   const handleCancelRegen = useCallback(() => {
@@ -635,6 +696,7 @@ function ChroniclePage({
           regeneratingChapter={regeneratingChapter}
           onRefresh={handleRefresh}
           onOpenNarratorPanel={() => setNarratorPanelOpen(true)}
+          onPublish={() => setPublishDialogOpen(true)}
           onExport={handleExport}
           collapsed={sidebarCollapsed}
           onToggleCollapse={() => setSidebarCollapsed(c => !c)}
@@ -653,7 +715,7 @@ function ChroniclePage({
                 transition={{ duration: 0.2 }}
                 onClick={() => setSidebarCollapsed(false)}
                 className="absolute top-3 left-3 z-10 w-7 h-7 flex items-center justify-center rounded text-text-secondary hover:text-accent-cyan transition-colors duration-150"
-                title="Open sidebar"
+                title={t('chronicle.page.openSidebar')}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" />
@@ -674,20 +736,28 @@ function ChroniclePage({
                   onClick={() => setError(null)}
                   className="py-1.5 px-3 border border-accent-red/50 rounded-md bg-transparent text-accent-red text-xs font-medium cursor-pointer transition-colors duration-200 hover:bg-accent-red/20"
                 >
-                  Dismiss
+                  {t('chronicle.page.dismiss')}
                 </button>
+              </div>
+            )}
+
+            {chronicle?.model_routing?.fallback && chronicle.model_routing.notice && (
+              <div className="stellaris-panel bg-accent-yellow/10 border-accent-yellow/30 rounded-lg p-3 mb-4">
+                <HUDMicro className="text-accent-yellow">
+                  {chronicle.model_routing.notice}
+                </HUDMicro>
               </div>
             )}
 
             {savesLoading ? (
               <div className="flex flex-col items-center justify-center h-[300px] text-text-secondary gap-4">
                 <div className="w-10 h-10 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin-loader shadow-glow-sm" />
-                <p className="text-sm uppercase tracking-wider">Loading Archives...</p>
+                <p className="text-sm uppercase tracking-wider">{t('chronicle.page.loadingArchives')}</p>
               </div>
             ) : loading && !chronicle ? (
               <div className="flex flex-col items-center justify-center h-[300px] text-text-secondary gap-4">
                 <div className="w-10 h-10 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin-loader shadow-glow-sm" />
-                <p className="text-sm uppercase tracking-wider">Retrieving Chronicle...</p>
+                <p className="text-sm uppercase tracking-wider">{t('chronicle.page.retrieving')}</p>
               </div>
             ) : chronicle ? (
               <ChronicleContent
@@ -704,11 +774,10 @@ function ChroniclePage({
               <div className="flex flex-col items-center justify-center text-center h-[400px]">
                 <div className="text-accent-cyan text-5xl mb-6">◇</div>
                 <h2 className="font-display text-text-primary text-2xl tracking-wider uppercase mb-3">
-                  No Chronicle Yet
+                  {t('chronicle.page.emptyTitle')}
                 </h2>
                 <p className="text-text-secondary max-w-md leading-relaxed text-sm">
-                  Play your game and accumulate history. Chronicles are generated
-                  automatically as your empire progresses through the ages.
+                  {t('chronicle.page.emptyBody')}
                 </p>
               </div>
             )}
@@ -721,6 +790,13 @@ function ChroniclePage({
         isOpen={narratorPanelOpen}
         onClose={() => setNarratorPanelOpen(false)}
         selectedSaveId={selectedSaveId}
+      />
+      <ChroniclePublishDialog
+        isOpen={publishDialogOpen}
+        onClose={() => setPublishDialogOpen(false)}
+        saveId={selectedSaveId}
+        empireName={empireName}
+        chronicle={chronicle}
       />
     </div>
   )

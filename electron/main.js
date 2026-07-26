@@ -25,7 +25,13 @@ const { setupAutoUpdater, registerUpdateIpcHandlers, wireAutoUpdaterEvents } = r
 const { registerBackendIpcHandlers } = require('./main/ipc/backend')
 const { registerSettingsIpcHandlers } = require('./main/ipc/settings')
 const { registerExportIpcHandlers } = require('./main/ipc/export')
+const {
+  createChroniclePublishingService,
+  registerChroniclePublishingIpcHandlers,
+} = require('./main/ipc/chroniclePublishing')
 const { registerAnnouncementsIpcHandlers } = require('./main/ipc/announcements')
+const { registerMcpRelayIpcHandlers } = require('./main/ipc/mcpRelay')
+const { createMcpRelayService } = require('./main/mcpRelay')
 const { createDiscordOAuth } = require('./main/discord/oauth')
 const { createDiscordRelay } = require('./main/discord/relay')
 const { registerDiscordIpcHandlers } = require('./main/ipc/discord')
@@ -108,6 +114,7 @@ const SECRET_STORE_KEYS = {
   discordToken: 'secrets.discord-token',
   discordAccessToken: 'secrets.discord-access-token',
   discordRefreshToken: 'secrets.discord-refresh-token',
+  chroniclePublisherSecret: 'secrets.chronicle-publisher-secret',
 }
 
 function encryptSecret(plaintext) {
@@ -156,10 +163,15 @@ const store = new Store({
     savePath: '',
     // Anonymous ID for rate-limiting and de-duping reports (no personal data).
     installId: '',
+    // Accountless Chronicle publishing identity and save-to-publication receipts.
+    chroniclePublisherId: '',
+    chroniclePublications: [],
     discordEnabled: false,
     uiScale: 1,
     uiTheme: 'stellaris-cyan',
     chronicleRefreshMode: 'balanced',
+    modelRoutingMode: 'conserve',
+    language: 'system',
     hasCompletedOnboarding: false,
     // Window state persistence
     windowState: {
@@ -226,6 +238,11 @@ const UI_THEME_PRESETS = ['stellaris-cyan', 'tactica-green', 'command-amber']
 const DEFAULT_UI_THEME = 'stellaris-cyan'
 const CHRONICLE_REFRESH_MODE_PRESETS = ['balanced', 'enhanced']
 const DEFAULT_CHRONICLE_REFRESH_MODE = 'balanced'
+const MODEL_ROUTING_MODE_PRESETS = ['quality_first', 'conserve']
+const DEFAULT_MODEL_ROUTING_MODE = 'conserve'
+const LANGUAGE_PRESETS = ['system', 'en', 'de', 'fr', 'es', 'pt-BR', 'ja', 'zh-Hans', 'en-XA']
+const DEFAULT_LANGUAGE = 'system'
+const DEFAULT_RESOLVED_LANGUAGE = 'en'
 
 // Discord configuration (DISC-007)
 // These are set via environment or will use defaults for development
@@ -327,6 +344,19 @@ function buildBackendEnv(settings) {
 
   if (settings.anthropicApiKey) {
     env.ANTHROPIC_API_KEY = settings.anthropicApiKey
+  }
+
+  env.STELLARIS_MODEL_ROUTING_MODE = normalizeModelRoutingMode(settings.modelRoutingMode)
+
+  // Multiplayer player-empire selection. In MP saves the `player` block lists
+  // every human player; without an override the backend defaults to the first
+  // entry (often the host). These let the user pin their own empire.
+  if (settings.playerName) {
+    env.STELLARIS_PLAYER_NAME = String(settings.playerName)
+  }
+  if (settings.playerCountryId !== undefined && settings.playerCountryId !== null
+      && String(settings.playerCountryId).trim() !== '') {
+    env.STELLARIS_PLAYER_COUNTRY_ID = String(settings.playerCountryId).trim()
   }
 
   // Prefer an explicit directory, otherwise auto-detect a standard location.
@@ -763,6 +793,66 @@ function getChronicleRefreshModeSetting() {
   )
 }
 
+function normalizeModelRoutingMode(rawValue) {
+  if (typeof rawValue !== 'string') return DEFAULT_MODEL_ROUTING_MODE
+  const normalized = rawValue.replace(/-/g, '_')
+  if (normalized === 'auto' || normalized === 'flash_first') return 'quality_first'
+  if (normalized === 'quota_saver' || normalized === 'lite_first' || normalized === 'flash_lite_first') return 'conserve'
+  return MODEL_ROUTING_MODE_PRESETS.includes(normalized)
+    ? normalized
+    : DEFAULT_MODEL_ROUTING_MODE
+}
+
+function getModelRoutingModeSetting() {
+  return normalizeModelRoutingMode(store.get('modelRoutingMode', DEFAULT_MODEL_ROUTING_MODE))
+}
+
+function normalizeLanguage(rawValue) {
+  if (typeof rawValue !== 'string') return DEFAULT_LANGUAGE
+  const normalized = rawValue.trim()
+  if (normalized === 'pt_BR') return 'pt-BR'
+  if (normalized === 'zh-CN' || normalized === 'zh_CN' || normalized === 'zh-Hans-CN') {
+    return 'zh-Hans'
+  }
+  return LANGUAGE_PRESETS.includes(normalized) ? normalized : DEFAULT_LANGUAGE
+}
+
+function resolveLanguage(language) {
+  const normalized = normalizeLanguage(language)
+  if (normalized !== 'system') return normalized
+
+  let appLocale = ''
+  try {
+    appLocale = app.getLocale()
+  } catch {
+    appLocale = ''
+  }
+
+  const locale = String(appLocale || '').trim()
+  if (!locale) return DEFAULT_RESOLVED_LANGUAGE
+  if (locale === 'pt-BR' || locale.toLowerCase().startsWith('pt')) return 'pt-BR'
+  if (
+    locale === 'zh-Hans' ||
+    locale.toLowerCase().startsWith('zh-cn') ||
+    locale.toLowerCase().startsWith('zh-sg') ||
+    locale.toLowerCase().startsWith('zh-hans')
+  ) {
+    return 'zh-Hans'
+  }
+
+  const base = locale.split(/[-_]/)[0].toLowerCase()
+  if (['en', 'de', 'fr', 'es', 'ja'].includes(base)) return base
+  return DEFAULT_RESOLVED_LANGUAGE
+}
+
+function getLanguageSetting() {
+  return normalizeLanguage(store.get('language', DEFAULT_LANGUAGE))
+}
+
+function getResolvedLanguageSetting() {
+  return resolveLanguage(getLanguageSetting())
+}
+
 function applyUiScaleToWindow(targetWindow = mainWindow) {
   if (!targetWindow || targetWindow.isDestroyed()) return
   targetWindow.webContents.setZoomFactor(getUiScaleSetting())
@@ -795,10 +885,15 @@ function getSettings() {
   const llmModel = store.get('llmModel', '')
   const llmBaseUrl = store.get('llmBaseUrl', '')
   const saveDir = store.get('saveDir', '')
+  const playerName = store.get('playerName', '')
+  const playerCountryId = store.get('playerCountryId', '')
   const discordEnabled = store.get('discordEnabled', false)
   const uiScale = getUiScaleSetting()
   const uiTheme = getUiThemeSetting()
   const chronicleRefreshMode = getChronicleRefreshModeSetting()
+  const modelRoutingMode = getModelRoutingModeSetting()
+  const language = getLanguageSetting()
+  const resolvedLanguage = getResolvedLanguageSetting()
 
   return {
     llmProvider,
@@ -815,10 +910,15 @@ function getSettings() {
     saveDir,
     // Backwards-compat: older renderer builds expect `savePath`.
     savePath: saveDir,
+    playerName,
+    playerCountryId,
     discordEnabled,
     uiScale,
     uiTheme,
     chronicleRefreshMode,
+    modelRoutingMode,
+    language,
+    resolvedLanguage,
   }
 }
 
@@ -835,11 +935,16 @@ function getSettingsWithSecrets() {
   const llmModel = store.get('llmModel', '')
   const llmBaseUrl = store.get('llmBaseUrl', '')
   const saveDir = store.get('saveDir', '')
+  const playerName = store.get('playerName', '')
+  const playerCountryId = store.get('playerCountryId', '')
   const lastSaveFilePath = store.get('lastSaveFilePath', '')
   const discordEnabled = store.get('discordEnabled', false)
   const uiScale = getUiScaleSetting()
   const uiTheme = getUiThemeSetting()
   const chronicleRefreshMode = getChronicleRefreshModeSetting()
+  const modelRoutingMode = getModelRoutingModeSetting()
+  const language = getLanguageSetting()
+  const resolvedLanguage = getResolvedLanguageSetting()
 
   return {
     llmProvider,
@@ -852,11 +957,16 @@ function getSettingsWithSecrets() {
     saveDir,
     // Backwards-compat: older renderer builds may still send/expect `savePath`.
     savePath: saveDir,
+    playerName,
+    playerCountryId,
     lastSaveFilePath,
     discordEnabled,
     uiScale,
     uiTheme,
     chronicleRefreshMode,
+    modelRoutingMode,
+    language,
+    resolvedLanguage,
   }
 }
 
@@ -904,6 +1014,14 @@ function saveSettings(settings) {
     store.set('lastSaveFilePath', '')
   }
 
+  if (settings.playerName !== undefined) {
+    store.set('playerName', String(settings.playerName || '').trim())
+  }
+
+  if (settings.playerCountryId !== undefined) {
+    store.set('playerCountryId', String(settings.playerCountryId || '').trim())
+  }
+
   if (settings.discordEnabled !== undefined) {
     store.set('discordEnabled', settings.discordEnabled)
   }
@@ -922,6 +1040,14 @@ function saveSettings(settings) {
       'chronicleRefreshMode',
       normalizeChronicleRefreshMode(settings.chronicleRefreshMode),
     )
+  }
+
+  if (settings.modelRoutingMode !== undefined) {
+    store.set('modelRoutingMode', normalizeModelRoutingMode(settings.modelRoutingMode))
+  }
+
+  if (settings.language !== undefined) {
+    store.set('language', normalizeLanguage(settings.language))
   }
 
   return { success: true }
@@ -1367,7 +1493,12 @@ function createWindow() {
   })
 }
 
-registerBackendIpcHandlers({ ipcMain, validateSender, callBackendApiEnvelope })
+registerBackendIpcHandlers({
+  ipcMain,
+  validateSender,
+  callBackendApiEnvelope,
+  getResolvedLanguage: getResolvedLanguageSetting,
+})
 
 // =============================================================================
 // Feedback reporting handlers
@@ -1453,7 +1584,12 @@ registerSettingsIpcHandlers({
       changedSettings.openaiApiKey !== undefined ||
       changedSettings.anthropicApiKey !== undefined ||
       changedSettings.saveDir !== undefined ||
-      changedSettings.savePath !== undefined
+      changedSettings.savePath !== undefined ||
+      changedSettings.modelRoutingMode !== undefined ||
+      // Player-empire override is read from the backend env at launch, so a
+      // change must restart the backend for it to take effect.
+      changedSettings.playerName !== undefined ||
+      changedSettings.playerCountryId !== undefined
 
     if (backendRelevantSettingsChanged && !E2E_SKIP_BACKEND_AUTOSTART) {
       restartPythonBackend(fullSettings)
@@ -1467,6 +1603,33 @@ registerExportIpcHandlers({
   dialog,
   getMainWindow: () => mainWindow,
   app,
+})
+
+const chroniclePublishingService = createChroniclePublishingService({
+  store,
+  getSecret,
+  setSecret,
+  secretStoreKey: SECRET_STORE_KEYS.chroniclePublisherSecret,
+  isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+})
+
+registerChroniclePublishingIpcHandlers({
+  ipcMain,
+  validateSender,
+  service: chroniclePublishingService,
+})
+
+const mcpRelayService = createMcpRelayService({
+  app,
+  getPythonPath,
+  getResolvedLanguage: getResolvedLanguageSetting,
+})
+
+registerMcpRelayIpcHandlers({
+  ipcMain,
+  validateSender,
+  shell,
+  mcpRelayService,
 })
 
 // =============================================================================

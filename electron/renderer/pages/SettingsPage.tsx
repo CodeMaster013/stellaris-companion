@@ -1,11 +1,20 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_CHRONICLE_REFRESH_MODE,
+  DEFAULT_LANGUAGE,
+  DEFAULT_MODEL_ROUTING_MODE,
   DEFAULT_UI_THEME,
   normalizeChronicleRefreshMode,
+  normalizeLanguage,
+  normalizeModelRoutingMode,
+  normalizeResolvedLanguage,
   normalizeUiTheme,
   normalizeLLMProvider,
   type ChronicleRefreshMode,
+  type LanguageSetting,
+  type ModelRoutingMode,
+  type ResolvedLanguage,
   type UiTheme,
   type LLMProvider,
   useSettings,
@@ -18,6 +27,7 @@ import {
   LOCAL_PROVIDERS,
   type OllamaModel,
 } from '../constants/llmProviders'
+import { LANGUAGE_OPTIONS } from '../i18n/languages'
 import { useDiscord } from '../hooks/useDiscord'
 import { HUDHeader, HUDSectionTitle, HUDMicro, HUDLabel } from '../components/hud/HUDText'
 import { HUDPanel } from '../components/hud/HUDPanel'
@@ -25,23 +35,26 @@ import { HUDInput } from '../components/hud/HUDInput'
 import { HUDButton } from '../components/hud/HUDButton'
 import { HUDSelect } from '../components/hud/HUDForm'
 import { useToast } from '../components/Toast'
+import type { McpRelayHealthResult, McpRelayStatus } from '../global'
 
 /**
  * DISC-017: Convert technical error messages to user-friendly messages.
  */
-function getUserFriendlyErrorMessage(error: string | null): string | null {
+function getUserFriendlyErrorMessage(error: string | null, t: (key: string) => string): string | null {
   if (!error) return null
-  if (error.toLowerCase().includes('cancel') || error.includes('Authorization timeout')) return 'Authorization cancelled.'
-  if (error.includes('expired')) return 'Session expired. Reconnect required.'
-  if (error.toLowerCase().includes('auth')) return 'Authorization failed.'
-  if (error.includes('connect')) return 'Connection error. Check network.'
-  return 'System error. Retry.'
+  if (error.toLowerCase().includes('cancel') || error.includes('Authorization timeout')) return t('settings.discordErrors.cancelled')
+  if (error.includes('expired')) return t('settings.discordErrors.expired')
+  if (error.toLowerCase().includes('auth')) return t('settings.discordErrors.auth')
+  if (error.includes('connect')) return t('settings.discordErrors.connection')
+  return t('settings.discordErrors.generic')
 }
 
 interface SettingsPageProps {
   onReportIssue?: () => void
   onThemeChange?: (theme: UiTheme) => void
   onChronicleRefreshModeChange?: (mode: ChronicleRefreshMode) => void
+  onModelRoutingModeChange?: (mode: ModelRoutingMode) => void
+  onLanguageChange?: (language: ResolvedLanguage) => void
 }
 
 const UI_SCALE_OPTIONS = [
@@ -63,21 +76,26 @@ const UI_THEME_LABELS: Record<UiTheme, string> = {
   'command-amber': 'Command Amber',
 }
 
-const CHRONICLE_REFRESH_MODE_LABELS: Record<ChronicleRefreshMode, string> = {
-  balanced: 'Balanced',
-  enhanced: 'Enhanced',
+type GeminiQuotaMode = 'standard' | 'higher'
+
+const GEMINI_QUOTA_MODES: GeminiQuotaMode[] = ['standard', 'higher']
+
+function quotaModeToRoutingMode(mode: GeminiQuotaMode): ModelRoutingMode {
+  return mode === 'higher' ? 'quality_first' : 'conserve'
 }
 
-const CHRONICLE_REFRESH_MODE_HELPERS: Record<ChronicleRefreshMode, string> = {
-  balanced: 'Lower Gemini usage. Best default for free tier and steadier cliffhanger updates.',
-  enhanced: 'Faster current-era story updates while viewing Chronicle. Uses more Gemini calls.',
+function routingModeToQuotaMode(mode: ModelRoutingMode): GeminiQuotaMode {
+  return mode === 'quality_first' ? 'higher' : 'standard'
 }
 
 function SettingsPage({
   onReportIssue,
   onThemeChange,
   onChronicleRefreshModeChange,
+  onModelRoutingModeChange,
+  onLanguageChange,
 }: SettingsPageProps) {
+  const { t } = useTranslation()
   const { settings, loading, saving, error, saveSettings, showFolderDialog } = useSettings()
   const { showToast } = useToast()
 
@@ -98,6 +116,7 @@ function SettingsPage({
   const [llmModel, setLlmModel] = useState('')
   const [llmBaseUrl, setLlmBaseUrl] = useState('')
   const [saveDir, setSaveDir] = useState('')
+  const [playerName, setPlayerName] = useState('')
   const [uiScale, setUiScale] = useState(1)
   const [uiScaleSaving, setUiScaleSaving] = useState(false)
   const [uiTheme, setUiTheme] = useState<UiTheme>(DEFAULT_UI_THEME)
@@ -106,8 +125,19 @@ function SettingsPage({
     DEFAULT_CHRONICLE_REFRESH_MODE,
   )
   const [chronicleRefreshModeSaving, setChronicleRefreshModeSaving] = useState(false)
+  const [modelRoutingMode, setModelRoutingMode] = useState<ModelRoutingMode>(
+    DEFAULT_MODEL_ROUTING_MODE,
+  )
+  const [modelRoutingModeSaving, setModelRoutingModeSaving] = useState(false)
+  const [language, setLanguage] = useState<LanguageSetting>(DEFAULT_LANGUAGE)
+  const [languageSaving, setLanguageSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
   const [saveSuccess, setSaveSuccess] = useState(false)
+  const [mcpRelayStatus, setMcpRelayStatus] = useState<McpRelayStatus | null>(null)
+  const [mcpRelayHealth, setMcpRelayHealth] = useState<McpRelayHealthResult | null>(null)
+  const [mcpRelayLoading, setMcpRelayLoading] = useState(false)
+  const [mcpRelayChecking, setMcpRelayChecking] = useState(false)
+  const [mcpRelayInstalling, setMcpRelayInstalling] = useState(false)
   const successTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Ollama model fetching state
@@ -179,17 +209,25 @@ function SettingsPage({
       setLlmModel(settings.llmModel || '')
       setLlmBaseUrl(settings.llmBaseUrl || '')
       setSaveDir(settings.saveDir || '')
+      setPlayerName(settings.playerName || '')
       setUiScale(settings.uiScale || 1)
       const normalizedTheme = normalizeUiTheme(settings.uiTheme)
       const normalizedChronicleRefreshMode = normalizeChronicleRefreshMode(
         settings.chronicleRefreshMode,
       )
+      const normalizedModelRoutingMode = normalizeModelRoutingMode(settings.modelRoutingMode)
+      const normalizedLanguage = normalizeLanguage(settings.language)
+      const normalizedResolvedLanguage = normalizeResolvedLanguage(settings.resolvedLanguage)
       setUiTheme(normalizedTheme)
       setChronicleRefreshMode(normalizedChronicleRefreshMode)
+      setModelRoutingMode(normalizedModelRoutingMode)
+      setLanguage(normalizedLanguage)
       onThemeChange?.(normalizedTheme)
       onChronicleRefreshModeChange?.(normalizedChronicleRefreshMode)
+      onModelRoutingModeChange?.(normalizedModelRoutingMode)
+      onLanguageChange?.(normalizedResolvedLanguage)
     }
-  }, [onChronicleRefreshModeChange, onThemeChange, settings])
+  }, [onChronicleRefreshModeChange, onLanguageChange, onModelRoutingModeChange, onThemeChange, settings])
 
   useEffect(() => {
     if (!settings) return
@@ -212,6 +250,7 @@ function SettingsPage({
     
     // Check for path change
     const hasPathChange = saveDir !== (settings.saveDir || '')
+    const hasPlayerNameChange = playerName !== (settings.playerName || '')
     
     setHasChanges(
       hasGoogleKeyChange || 
@@ -220,9 +259,30 @@ function SettingsPage({
       hasProviderChange || 
       hasModelChange || 
       hasBaseUrlChange || 
-      hasPathChange
+      hasPathChange ||
+      hasPlayerNameChange
     )
-  }, [googleApiKey, openaiApiKey, anthropicApiKey, llmProvider, llmModel, llmBaseUrl, saveDir, settings])
+  }, [googleApiKey, openaiApiKey, anthropicApiKey, llmProvider, llmModel, llmBaseUrl, saveDir, playerName, settings])
+
+  useEffect(() => {
+    let cancelled = false
+    const loadMcpRelayStatus = async () => {
+      if (!window.electronAPI?.mcpRelay?.status) return
+      setMcpRelayLoading(true)
+      try {
+        const status = await window.electronAPI.mcpRelay.status()
+        if (!cancelled) setMcpRelayStatus(status)
+      } catch {
+        if (!cancelled) setMcpRelayStatus(null)
+      } finally {
+        if (!cancelled) setMcpRelayLoading(false)
+      }
+    }
+    void loadMcpRelayStatus()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const handleBrowse = async () => {
     const selectedPath = await showFolderDialog()
@@ -236,9 +296,8 @@ function SettingsPage({
       llmProvider,
       llmModel,
       llmBaseUrl,
+      playerName,
     }
-    
-    // Only save API keys if they're not masked (i.e., user entered a new value)
     if (!googleApiKey.includes('...')) {
       settingsToSave.googleApiKey = googleApiKey
     }
@@ -260,6 +319,79 @@ function SettingsPage({
   const handleConnectDiscord = async () => { await connectDiscord() }
   const handleDisconnectDiscord = async () => { await disconnectDiscord() }
 
+  const refreshMcpRelayStatus = async () => {
+    if (!window.electronAPI?.mcpRelay?.status) return null
+    const status = await window.electronAPI.mcpRelay.status()
+    setMcpRelayStatus(status)
+    return status
+  }
+
+  const handleMcpRelayHealthCheck = async () => {
+    if (!window.electronAPI?.mcpRelay?.healthCheck) return
+    setMcpRelayChecking(true)
+    try {
+      const result = await window.electronAPI.mcpRelay.healthCheck()
+      setMcpRelayHealth(result)
+      showToast({
+        type: result.ok ? 'success' : 'error',
+        message: result.ok ? t('settings.mcpRelay.healthSuccess') : result.message,
+        duration: result.ok ? 2200 : 5000,
+      })
+      await refreshMcpRelayStatus()
+    } catch (e) {
+      const message = e instanceof Error ? e.message : t('settings.mcpRelay.healthError')
+      setMcpRelayHealth({ ok: false, message })
+      showToast({ type: 'error', message, duration: 5000 })
+    } finally {
+      setMcpRelayChecking(false)
+    }
+  }
+
+  const handleCopyMcpRelayText = async (text: string | undefined, label: string) => {
+    if (!text || !window.electronAPI?.copyToClipboard) return
+    const result = await window.electronAPI.copyToClipboard(text)
+    showToast({
+      type: result?.success ? 'success' : 'error',
+      message: result?.success
+        ? t('settings.mcpRelay.copySuccess', { target: label })
+        : t('settings.mcpRelay.copyError'),
+      duration: result?.success ? 1800 : 4000,
+    })
+  }
+
+  const handleInstallClaudeDesktop = async () => {
+    if (!window.electronAPI?.mcpRelay?.installClaudeDesktop) return
+    const confirmed = window.confirm(t('settings.mcpRelay.installConfirm'))
+    if (!confirmed) return
+    setMcpRelayInstalling(true)
+    try {
+      const result = await window.electronAPI.mcpRelay.installClaudeDesktop()
+      if (result.status) setMcpRelayStatus(result.status)
+      if (!result.success) {
+        showToast({
+          type: 'error',
+          message: result.error || t('settings.mcpRelay.installError'),
+          duration: 6000,
+        })
+        return
+      }
+      showToast({
+        type: 'success',
+        message: t('settings.mcpRelay.installSuccess'),
+        duration: 2500,
+      })
+      await refreshMcpRelayStatus()
+    } catch (e) {
+      showToast({
+        type: 'error',
+        message: e instanceof Error ? e.message : t('settings.mcpRelay.installError'),
+        duration: 6000,
+      })
+    } finally {
+      setMcpRelayInstalling(false)
+    }
+  }
+
   const [retrying, setRetrying] = useState(false)
   const handleUiScaleChange = async (rawValue: string) => {
     const nextScale = Number(rawValue)
@@ -277,7 +409,7 @@ function SettingsPage({
       setUiScale(previousScale)
       showToast({
         type: 'error',
-        message: 'Failed to update text size. Please try again.',
+        message: t('settings.toasts.textSizeError'),
         duration: 4000,
       })
       return
@@ -285,7 +417,7 @@ function SettingsPage({
 
     showToast({
       type: 'success',
-      message: `Text size set to ${Math.round(nextScale * 100)}%.`,
+      message: t('settings.toasts.textSizeSuccess', { percent: Math.round(nextScale * 100) }),
       duration: 1800,
     })
   }
@@ -307,7 +439,7 @@ function SettingsPage({
       onThemeChange?.(previousTheme)
       showToast({
         type: 'error',
-        message: 'Failed to update color theme. Please try again.',
+        message: t('settings.toasts.themeError'),
         duration: 4000,
       })
       return
@@ -315,7 +447,7 @@ function SettingsPage({
 
     showToast({
       type: 'success',
-      message: `Theme set to ${UI_THEME_LABELS[nextTheme]}.`,
+      message: t('settings.toasts.themeSuccess', { theme: UI_THEME_LABELS[nextTheme] }),
       duration: 1800,
     })
   }
@@ -337,7 +469,7 @@ function SettingsPage({
       onChronicleRefreshModeChange?.(previousMode)
       showToast({
         type: 'error',
-        message: 'Failed to update Chronicle refresh mode. Please try again.',
+        message: t('settings.chronicleRefresh.toastError'),
         duration: 4000,
       })
       return
@@ -345,7 +477,87 @@ function SettingsPage({
 
     showToast({
       type: 'success',
-      message: `Chronicle refresh mode set to ${CHRONICLE_REFRESH_MODE_LABELS[nextMode]}.`,
+      message: t('settings.chronicleRefresh.toastSuccess', {
+        mode: t(`settings.chronicleRefresh.${nextMode}`),
+      }),
+      duration: 1800,
+    })
+  }
+
+  const handleModelRoutingModeChange = async (rawValue: string) => {
+    const nextMode = normalizeModelRoutingMode(rawValue)
+    if (nextMode === modelRoutingMode) return
+
+    const previousMode = modelRoutingMode
+    setModelRoutingMode(nextMode)
+    onModelRoutingModeChange?.(nextMode)
+    setModelRoutingModeSaving(true)
+
+    const success = await saveSettings({ modelRoutingMode: nextMode })
+    setModelRoutingModeSaving(false)
+
+    if (!success) {
+      setModelRoutingMode(previousMode)
+      onModelRoutingModeChange?.(previousMode)
+      showToast({
+        type: 'error',
+        message: t('settings.modelRouting.toastError'),
+        duration: 4000,
+      })
+      return
+    }
+
+    showToast({
+      type: 'success',
+      message: t('settings.modelRouting.toastSuccess', {
+        mode: t(`settings.modelRouting.${nextMode === 'quality_first' ? 'qualityFirst' : 'conserve'}`),
+      }),
+      duration: 1800,
+    })
+  }
+
+  const handleGeminiQuotaModeChange = async (nextQuotaMode: GeminiQuotaMode) => {
+    await handleModelRoutingModeChange(quotaModeToRoutingMode(nextQuotaMode))
+  }
+
+  const handleLanguageChange = async (rawValue: string) => {
+    const nextLanguage = normalizeLanguage(rawValue)
+    if (nextLanguage === language) return
+
+    const previousLanguage = language
+    setLanguage(nextLanguage)
+    setLanguageSaving(true)
+
+    const success = await saveSettings({ language: nextLanguage })
+    setLanguageSaving(false)
+
+    if (!success) {
+      setLanguage(previousLanguage)
+      showToast({
+        type: 'error',
+        message: t('settings.toasts.languageError'),
+        duration: 4000,
+      })
+      return
+    }
+
+    try {
+      const loaded = await window.electronAPI?.getSettings()
+      const loadedLanguage = normalizeLanguage((loaded as { language?: unknown } | undefined)?.language)
+      const loadedResolved = normalizeResolvedLanguage(
+        (loaded as { resolvedLanguage?: unknown } | undefined)?.resolvedLanguage,
+      )
+      setLanguage(loadedLanguage)
+      onLanguageChange?.(loadedResolved)
+    } catch {
+      onLanguageChange?.(normalizeResolvedLanguage(nextLanguage))
+    }
+
+    showToast({
+      type: 'success',
+      message: t('settings.toasts.languageSuccess', {
+        language: t(`languages.${nextLanguage}`),
+      }),
       duration: 1800,
     })
   }
@@ -362,50 +574,106 @@ function SettingsPage({
     }
   }
 
+  const languageOptions = LANGUAGE_OPTIONS.map((option) => ({
+    value: option.value,
+    label: t(`languages.${option.value}`),
+  }))
+
+  const chronicleModeLabel = (mode: ChronicleRefreshMode) =>
+    t(`settings.chronicleRefresh.${mode}`)
+
+  const chronicleModeHelper = (mode: ChronicleRefreshMode) =>
+    t(`settings.chronicleRefresh.${mode}Help`)
+
+  const modelRoutingLabel = (mode: ModelRoutingMode) =>
+    t(`settings.modelRouting.${mode === 'quality_first' ? 'qualityFirst' : 'conserve'}`)
+
+  const modelRoutingHelper = (mode: ModelRoutingMode) =>
+    t(`settings.modelRouting.${mode === 'quality_first' ? 'qualityFirstHelp' : 'conserveHelp'}`)
+
+  const geminiQuotaMode = routingModeToQuotaMode(modelRoutingMode)
+  const geminiQuotaLabel = (mode: GeminiQuotaMode) => t(`settings.geminiQuota.${mode}`)
+  const geminiQuotaTag = (mode: GeminiQuotaMode) => t(`settings.geminiQuota.${mode}Tag`)
+  const geminiQuotaHelper = (mode: GeminiQuotaMode) => t(`settings.geminiQuota.${mode}Help`)
+
+  const mcpRelayReady = Boolean(mcpRelayStatus?.databaseExists)
+  const mcpRelayConfigured = Boolean(mcpRelayStatus?.claudeDesktop?.configured)
+  const mcpRelayCurrent = Boolean(mcpRelayStatus?.claudeDesktop?.current)
+  const mcpRelaySummary = mcpRelayLoading
+    ? t('settings.mcpRelay.loadingSummary')
+    : mcpRelayReady
+      ? t('settings.mcpRelay.readySummary')
+      : t('settings.mcpRelay.noDatabaseSummary')
+  const claudeDesktopStatusLabel = mcpRelayConfigured
+    ? (mcpRelayCurrent ? t('settings.mcpRelay.installed') : t('settings.mcpRelay.installedNeedsRefresh'))
+    : t('settings.mcpRelay.notInstalled')
+  const claudeDesktopStatusClass = mcpRelayConfigured
+    ? (mcpRelayCurrent ? 'text-accent-green' : 'text-accent-yellow')
+    : 'text-text-secondary'
+  const claudeDesktopActionLabel = mcpRelayInstalling
+    ? t('settings.mcpRelay.installing')
+    : mcpRelayCurrent
+      ? t('settings.mcpRelay.claudeConnected')
+      : mcpRelayConfigured
+        ? t('settings.mcpRelay.updateClaude')
+        : t('settings.mcpRelay.connectClaude')
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
            <div className="w-12 h-12 border-t-2 border-l-2 border-accent-cyan rounded-full animate-spin" />
-           <HUDMicro className="animate-pulse">INITIALIZING CONFIGURATION...</HUDMicro>
+           <HUDMicro className="animate-pulse">{t('settings.loading')}</HUDMicro>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="h-full overflow-y-auto custom-scrollbar pr-2 pb-12">
-      <div className="max-w-4xl mx-auto pt-4">
+    <div className="h-full overflow-y-auto custom-scrollbar pr-2 pb-28">
+      <div className="max-w-4xl mx-auto pt-2">
         
         {/* Header Area */}
-        <div className="flex items-end justify-between mb-8">
-            <div>
-                <HUDMicro className="mb-1 text-accent-cyan">SYS // CONFIG_01</HUDMicro>
-                <HUDHeader size="xl">CONFIGURATION</HUDHeader>
+        <div className="mb-6 space-y-4">
+            <div className="min-w-0">
+                <HUDMicro className="mb-1 text-accent-cyan">{t('settings.eyebrow')}</HUDMicro>
+                <HUDHeader size="xl" className="leading-none break-words">{t('settings.title')}</HUDHeader>
             </div>
-            <div className="w-[420px] max-w-[60%] grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <HUDSelect
-                  label="Text Size"
+                  label={t('settings.textSize')}
                   value={String(uiScale)}
                   disabled={uiScaleSaving}
                   onChange={(e) => void handleUiScaleChange(e.target.value)}
                   options={UI_SCALE_OPTIONS}
                 />
                 <HUDMicro className="block mt-1 text-right">
-                  {uiScaleSaving ? 'APPLYING...' : 'CMD/CTRL +/-/0'}
+                  {uiScaleSaving ? t('common.applying') : 'CMD/CTRL +/-/0'}
                 </HUDMicro>
               </div>
               <div>
                 <HUDSelect
-                  label="Color Theme"
+                  label={t('settings.colorTheme')}
                   value={uiTheme}
                   disabled={uiThemeSaving}
                   onChange={(e) => void handleUiThemeChange(e.target.value)}
                   options={UI_THEME_OPTIONS}
                 />
                 <HUDMicro className="block mt-1 text-right">
-                  {uiThemeSaving ? 'APPLYING...' : 'THEME PRESET'}
+                  {uiThemeSaving ? t('common.applying') : t('settings.themePreset')}
+                </HUDMicro>
+              </div>
+              <div>
+                <HUDSelect
+                  label={t('settings.language')}
+                  value={language}
+                  disabled={languageSaving}
+                  onChange={(e) => void handleLanguageChange(e.target.value)}
+                  options={languageOptions}
+                />
+                <HUDMicro className="block mt-1 text-right">
+                  {languageSaving ? t('common.applying') : t('settings.languageHint')}
                 </HUDMicro>
               </div>
             </div>
@@ -416,7 +684,7 @@ function SettingsPage({
             <HUDPanel variant="alert" className="mb-6 flex items-center gap-4" decoration="scanline">
                 <span className="text-accent-red text-xl">⚠</span>
                 <div>
-                    <HUDLabel className="text-accent-red">SYSTEM ALERT</HUDLabel>
+                    <HUDLabel className="text-accent-red">{t('settings.systemAlert')}</HUDLabel>
                     <p className="text-accent-red/80 font-mono text-sm">{error}</p>
                 </div>
             </HUDPanel>
@@ -426,7 +694,7 @@ function SettingsPage({
             <HUDPanel variant="primary" className="mb-6 border-accent-green/50" decoration="scanline">
                 <div className="flex items-center gap-3">
                     <div className="w-2 h-2 bg-accent-green shadow-glow-green" />
-                    <span className="font-mono text-accent-green text-sm">CONFIGURATION SAVED // SETTINGS APPLIED</span>
+                    <span className="font-mono text-accent-green text-sm">{t('settings.saveSuccess')}</span>
                 </div>
             </HUDPanel>
         )}
@@ -439,8 +707,8 @@ function SettingsPage({
                 
                 {/* API Section */}
                 <section>
-                    <HUDSectionTitle number="01">INTELLIGENCE UPLINK</HUDSectionTitle>
-                    <HUDPanel decoration="tech" title="LLM PROVIDER CONFIG">
+                    <HUDSectionTitle number="01">{t('settings.sections.intelligence')}</HUDSectionTitle>
+                    <HUDPanel decoration="tech" title={t('settings.panels.llmProviderConfig')} quiet>
                         <div className="space-y-4 pt-2">
                              {/* Provider Selection */}
                              <HUDSelect
@@ -451,25 +719,19 @@ function SettingsPage({
                                   const oldProvider = llmProvider
                                   setLlmProvider(newProvider)
                                   
-                                  // Auto-fill default base URL for local providers
-                                  // Update if: switching TO a local provider AND either:
-                                  // - base URL is empty, OR
-                                  // - base URL matches the OLD provider's default (user didn't customize it)
-                                  const isLocalProvider = !!DEFAULT_BASE_URLS[newProvider]
+                                  const isNewProviderLocal = !!DEFAULT_BASE_URLS[newProvider]
                                   const oldProviderDefault = DEFAULT_BASE_URLS[oldProvider]
                                   const isBaseUrlDefault = !llmBaseUrl || llmBaseUrl === oldProviderDefault
                                   
-                                  if (isLocalProvider && isBaseUrlDefault) {
+                                  if (isNewProviderLocal && isBaseUrlDefault) {
                                     setLlmBaseUrl(DEFAULT_BASE_URLS[newProvider] || '')
-                                  } else if (!isLocalProvider) {
-                                    // Clear base URL when switching to cloud providers
+                                  } else if (!isNewProviderLocal) {
                                     setLlmBaseUrl('')
                                   }
                                 }}
                                 options={LLM_PROVIDER_OPTIONS}
                               />
                              
-                             {/* API Key for cloud providers */}
                              {PROVIDER_API_KEY_MAP[llmProvider] === 'google' && (
                                <>
                                  <HUDInput 
@@ -545,7 +807,6 @@ function SettingsPage({
                                </>
                              )}
                              
-                             {/* Base URL for local providers */}
                              {(llmProvider === 'openai-compatible' || llmProvider === 'ollama') && (
                                <>
                                  <HUDInput 
@@ -564,7 +825,6 @@ function SettingsPage({
                                </>
                              )}
                              
-                             {/* Model Selection - Required for local providers, optional for cloud */}
                              {llmProvider === 'ollama' ? (
                                <>
                                  <div className="flex gap-2 items-end">
@@ -629,47 +889,146 @@ function SettingsPage({
                                  </HUDMicro>
                                </>
                              )}
-
-                             {/* Chronicle Refresh Mode - from upstream */}
                              <div className="border-t border-white/10 pt-4 space-y-3">
                                  <div className="flex items-center justify-between gap-3">
-                                     <HUDLabel>CHRONICLE REFRESH</HUDLabel>
-                                     {chronicleRefreshModeSaving && (
-                                       <HUDMicro className="text-right">APPLYING...</HUDMicro>
+                                     <HUDLabel>{t('settings.geminiQuota.label')}</HUDLabel>
+                                     {modelRoutingModeSaving && (
+                                       <HUDMicro className="text-right">{t('common.applying')}</HUDMicro>
                                      )}
                                  </div>
+                                 <HUDMicro className="block text-[10px] leading-relaxed text-white/45 normal-case tracking-[0.02em]">
+                                   {t('settings.geminiQuota.description')}
+                                 </HUDMicro>
 
                                  <div className="grid grid-cols-2 gap-2 rounded-sm border border-white/10 bg-black/20 p-1">
-                                   {(['balanced', 'enhanced'] as const).map((mode) => {
-                                     const isSelected = chronicleRefreshMode === mode
+                                   {GEMINI_QUOTA_MODES.map((mode) => {
+                                     const isSelected = geminiQuotaMode === mode
                                      return (
                                        <button
                                          key={mode}
                                          type="button"
-                                         disabled={chronicleRefreshModeSaving}
+                                         disabled={modelRoutingModeSaving}
                                          aria-pressed={isSelected}
-                                         aria-label={`Set refresh mode to ${CHRONICLE_REFRESH_MODE_LABELS[mode]}`}
-                                         onClick={() => void handleChronicleRefreshModeChange(mode)}
+                                         aria-label={t('settings.geminiQuota.aria', { mode: geminiQuotaLabel(mode) })}
+                                         onClick={() => void handleGeminiQuotaModeChange(mode)}
                                          className={`relative rounded-sm px-3 py-2 text-left transition-all duration-200 ${
                                            isSelected
-                                             ? 'border border-accent-cyan/60 bg-accent-cyan/12 text-accent-cyan shadow-glow-sm'
+                                             ? 'border border-accent-cyan/50 bg-accent-cyan/10 text-accent-cyan'
                                              : 'border border-transparent bg-transparent text-text-secondary hover:border-white/15 hover:bg-white/5 hover:text-text-primary'
                                          } disabled:opacity-50 disabled:cursor-not-allowed`}
                                        >
                                          <div className="font-display text-[11px] uppercase tracking-[0.18em]">
-                                           {CHRONICLE_REFRESH_MODE_LABELS[mode]}
+                                           {geminiQuotaLabel(mode)}
                                          </div>
                                          <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-white/35">
-                                           {mode === 'balanced' ? 'FREE-TIER DEFAULT' : 'MORE RESPONSIVE'}
+                                           {geminiQuotaTag(mode)}
                                          </div>
                                        </button>
                                      )
                                    })}
                                  </div>
 
-                                 <HUDMicro className="block leading-relaxed text-white/45 normal-case tracking-[0.08em]">
-                                   {CHRONICLE_REFRESH_MODE_HELPERS[chronicleRefreshMode]}
+                                 <HUDMicro className="block text-[10px] leading-relaxed text-white/45 normal-case tracking-[0.02em]">
+                                   {geminiQuotaHelper(geminiQuotaMode)}
                                  </HUDMicro>
+
+                                 <details className="group border-t border-white/10 pt-3">
+                                   <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-sm border border-white/10 bg-black/20 px-3 py-2 font-display text-[10px] uppercase tracking-[0.18em] text-text-secondary transition-all duration-200 hover:border-accent-cyan/40 hover:bg-accent-cyan/5 hover:text-accent-cyan">
+                                     <span className="flex items-center gap-2">
+                                       <span className="transition-transform duration-200 group-open:rotate-90">&gt;</span>
+                                       <span className="group-open:hidden">{t('settings.geminiQuota.showAdvanced')}</span>
+                                       <span className="hidden group-open:inline">{t('settings.geminiQuota.hideAdvanced')}</span>
+                                     </span>
+                                     <span className="font-mono text-[9px] tracking-[0.12em] text-white/35">
+                                       {t('settings.geminiQuota.optional')}
+                                     </span>
+                                   </summary>
+                                   <div className="mt-3 space-y-4">
+                                     <div className="space-y-3">
+                                       <div className="flex items-center justify-between gap-3">
+                                         <HUDLabel>{t('settings.modelRouting.label')}</HUDLabel>
+                                         {modelRoutingModeSaving && (
+                                           <HUDMicro className="text-right">{t('common.applying')}</HUDMicro>
+                                         )}
+                                       </div>
+
+                                       <div className="grid grid-cols-2 gap-2 rounded-sm border border-white/10 bg-black/20 p-1">
+                                         {(['quality_first', 'conserve'] as const).map((mode) => {
+                                           const isSelected = modelRoutingMode === mode
+                                           return (
+                                             <button
+                                               key={mode}
+                                               type="button"
+                                               disabled={modelRoutingModeSaving}
+                                               aria-pressed={isSelected}
+                                               aria-label={t('settings.modelRouting.toastSuccess', { mode: modelRoutingLabel(mode) })}
+                                               onClick={() => void handleModelRoutingModeChange(mode)}
+                                               className={`relative rounded-sm px-3 py-2 text-left transition-all duration-200 ${
+                                                 isSelected
+                                                   ? 'border border-accent-cyan/50 bg-accent-cyan/10 text-accent-cyan'
+                                                   : 'border border-transparent bg-transparent text-text-secondary hover:border-white/15 hover:bg-white/5 hover:text-text-primary'
+                                               } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                             >
+                                               <div className="font-display text-[11px] uppercase tracking-[0.18em]">
+                                                 {modelRoutingLabel(mode)}
+                                               </div>
+                                               <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-white/35">
+                                                 {mode === 'quality_first'
+                                                   ? t('settings.modelRouting.qualityFirstTag')
+                                                   : t('settings.modelRouting.conserveTag')}
+                                               </div>
+                                             </button>
+                                           )
+                                         })}
+                                       </div>
+
+                                       <HUDMicro className="block text-[10px] leading-relaxed text-white/45 normal-case tracking-[0.02em]">
+                                         {modelRoutingHelper(modelRoutingMode)}
+                                       </HUDMicro>
+                                     </div>
+
+                                     <div className="space-y-3">
+                                       <div className="flex items-center justify-between gap-3">
+                                         <HUDLabel>{t('settings.chronicleRefresh.label')}</HUDLabel>
+                                         {chronicleRefreshModeSaving && (
+                                           <HUDMicro className="text-right">{t('common.applying')}</HUDMicro>
+                                         )}
+                                       </div>
+
+                                       <div className="grid grid-cols-2 gap-2 rounded-sm border border-white/10 bg-black/20 p-1">
+                                         {(['balanced', 'enhanced'] as const).map((mode) => {
+                                           const isSelected = chronicleRefreshMode === mode
+                                           return (
+                                             <button
+                                               key={mode}
+                                               type="button"
+                                               disabled={chronicleRefreshModeSaving}
+                                               aria-pressed={isSelected}
+                                               aria-label={t('settings.chronicleRefresh.aria', { mode: chronicleModeLabel(mode) })}
+                                               onClick={() => void handleChronicleRefreshModeChange(mode)}
+                                               className={`relative rounded-sm px-3 py-2 text-left transition-all duration-200 ${
+                                                 isSelected
+                                                   ? 'border border-accent-cyan/50 bg-accent-cyan/10 text-accent-cyan'
+                                                   : 'border border-transparent bg-transparent text-text-secondary hover:border-white/15 hover:bg-white/5 hover:text-text-primary'
+                                               } disabled:opacity-50 disabled:cursor-not-allowed`}
+                                             >
+                                               <div className="font-display text-[11px] uppercase tracking-[0.18em]">
+                                                 {chronicleModeLabel(mode)}
+                                               </div>
+                                               <div className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-white/35">
+                                                 {mode === 'balanced' ? t('settings.chronicleRefresh.balancedTag') : t('settings.chronicleRefresh.enhancedTag')}
+                                               </div>
+                                             </button>
+                                           )
+                                         })}
+                                       </div>
+
+                                       <HUDMicro className="block text-[10px] leading-relaxed text-white/45 normal-case tracking-[0.02em]">
+                                         {chronicleModeHelper(chronicleRefreshMode)}
+                                       </HUDMicro>
+                                     </div>
+                                   </div>
+                                 </details>
                              </div>
                         </div>
                     </HUDPanel>
@@ -677,25 +1036,36 @@ function SettingsPage({
 
                 {/* Save Data Section */}
                 <section>
-                    <HUDSectionTitle number="02">DATA INGESTION</HUDSectionTitle>
-                    <HUDPanel decoration="brackets" title="SAVE FILE SOURCE">
+                    <HUDSectionTitle number="02">{t('settings.sections.data')}</HUDSectionTitle>
+                    <HUDPanel decoration="brackets" title={t('settings.panels.saveSource')} quiet>
                          <div className="space-y-4 pt-2">
                              <div className="flex gap-2 items-end">
                                  <HUDInput 
                                     className="flex-1"
-                                    label="DIRECTORY PATH"
+                                    label={t('settings.saveData.directoryLabel')}
                                     value={saveDir}
                                     onChange={(e) => setSaveDir(e.target.value)}
-                                    placeholder="AUTO-DETECT"
+                                    placeholder={t('settings.saveData.placeholder')}
                                     readOnly
                                  />
                                  <HUDButton variant="secondary" onClick={handleBrowse} className="mb-[1px]">
-                                     BROWSE
+                                     {t('common.browse')}
                                  </HUDButton>
                              </div>
                              <HUDMicro className="block mt-2">
-                                 TARGET: STELLARIS SAVE GAME DIRECTORY (LOCAL)
+                                 {t('settings.saveData.target')}
                              </HUDMicro>
+                             <div className="pt-2">
+                                 <HUDInput
+                                    label={t('settings.saveData.playerNameLabel')}
+                                    value={playerName}
+                                    onChange={(e) => setPlayerName(e.target.value)}
+                                    placeholder={t('settings.saveData.playerNamePlaceholder')}
+                                 />
+                                 <HUDMicro className="block mt-2 normal-case">
+                                     {t('settings.saveData.playerNameHelp')}
+                                 </HUDMicro>
+                             </div>
                          </div>
                     </HUDPanel>
                 </section>
@@ -704,16 +1074,144 @@ function SettingsPage({
 
             {/* Column 2: Comms & Feedback */}
             <div className="space-y-8">
+                {/* MCP Relay Section */}
+                <section>
+                    <HUDSectionTitle number="03">{t('settings.sections.mcpRelay')}</HUDSectionTitle>
+                    <HUDPanel
+                      decoration="tech"
+                      variant={mcpRelayReady ? 'primary' : 'secondary'}
+                      title={t('settings.panels.mcpRelay')}
+                      quiet
+                    >
+                        <div className="space-y-4 pt-2">
+                            <div className="border border-white/10 bg-white/5 p-3 rounded-sm space-y-2">
+                                <div className="flex items-center justify-between gap-3">
+                                  <HUDLabel>{t('settings.mcpRelay.claudeDesktop')}</HUDLabel>
+                                  <div className={`font-display text-[11px] tracking-wider ${claudeDesktopStatusClass}`}>
+                                    {claudeDesktopStatusLabel}
+                                  </div>
+                                </div>
+                                <p className="font-mono text-[10px] leading-relaxed text-white/45">
+                                  {mcpRelaySummary}
+                                </p>
+                                {mcpRelayStatus?.claudeDesktop?.error && (
+                                  <p className="font-mono text-[10px] leading-relaxed text-accent-red">
+                                    {mcpRelayStatus.claudeDesktop.error}
+                                  </p>
+                                )}
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                <HUDButton
+                                  variant="primary"
+                                  onClick={() => void handleInstallClaudeDesktop()}
+                                  disabled={mcpRelayInstalling || !mcpRelayStatus || mcpRelayCurrent}
+                                  className="px-3 text-[9px]"
+                                >
+                                  {claudeDesktopActionLabel}
+                                </HUDButton>
+                                <HUDButton
+                                  variant="secondary"
+                                  onClick={() => void handleCopyMcpRelayText(mcpRelayStatus?.snippets?.codex, 'Codex')}
+                                  disabled={!mcpRelayStatus}
+                                  className="px-3 text-[9px]"
+                                >
+                                  {t('settings.mcpRelay.copyCodexSetup')}
+                                </HUDButton>
+                            </div>
+
+                            <div className="border-t border-white/10 pt-3 space-y-1">
+                              <HUDLabel>{t('settings.mcpRelay.otherApps')}</HUDLabel>
+                              <HUDMicro className="block text-[10px] leading-relaxed text-white/45 normal-case tracking-[0.02em]">
+                                {t('settings.mcpRelay.otherAppsHelp')}
+                              </HUDMicro>
+                            </div>
+
+                            <details className="group">
+                              <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-sm border border-white/10 bg-black/20 px-3 py-2 font-display text-[10px] uppercase tracking-[0.18em] text-text-secondary transition-all duration-200 hover:border-accent-cyan/40 hover:bg-accent-cyan/5 hover:text-accent-cyan">
+                                <span className="flex items-center gap-2">
+                                  <span className="transition-transform duration-200 group-open:rotate-90">&gt;</span>
+                                  <span className="group-open:hidden">{t('settings.mcpRelay.showAdvancedSetup')}</span>
+                                  <span className="hidden group-open:inline">{t('settings.mcpRelay.hideAdvancedSetup')}</span>
+                                </span>
+                                <span className="font-mono text-[9px] tracking-[0.12em] text-white/35">
+                                  {t('settings.mcpRelay.optional')}
+                                </span>
+                              </summary>
+                              <div className="mt-3 space-y-3">
+                                <div className="border border-white/10 bg-black/20 p-3 rounded-sm space-y-2">
+                                  <div className="flex items-center justify-between gap-3">
+                                    <HUDLabel>{t('settings.mcpRelay.localEndpoint')}</HUDLabel>
+                                    <HUDMicro>{mcpRelayStatus?.language?.toUpperCase() || 'EN'}</HUDMicro>
+                                  </div>
+                                  <p className="font-mono text-[10px] leading-relaxed text-white/45 break-all">
+                                    {mcpRelayStatus?.dbPath || t('settings.mcpRelay.loading')}
+                                  </p>
+                                  {mcpRelayHealth && (
+                                    <p className={`font-mono text-[10px] leading-relaxed ${mcpRelayHealth.ok ? 'text-accent-green' : 'text-accent-red'}`}>
+                                      {mcpRelayHealth.message}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="grid grid-cols-2 gap-2">
+                                  <HUDButton
+                                    variant="secondary"
+                                    onClick={() => void handleMcpRelayHealthCheck()}
+                                    disabled={mcpRelayChecking}
+                                    className="px-3 text-[9px]"
+                                  >
+                                    {mcpRelayChecking ? t('settings.mcpRelay.checking') : t('settings.mcpRelay.runCheck')}
+                                  </HUDButton>
+                                  <HUDButton
+                                    variant="secondary"
+                                    onClick={() => void handleCopyMcpRelayText(mcpRelayStatus?.snippets?.claudeDesktop, 'Claude Desktop')}
+                                    disabled={!mcpRelayStatus}
+                                    className="px-3 text-[9px]"
+                                  >
+                                    {t('settings.mcpRelay.copyClaude')}
+                                  </HUDButton>
+                                  <HUDButton
+                                    variant="secondary"
+                                    onClick={() => void handleCopyMcpRelayText(mcpRelayStatus?.snippets?.claudeCode, 'Claude Code')}
+                                    disabled={!mcpRelayStatus}
+                                    className="px-3 text-[9px]"
+                                  >
+                                    {t('settings.mcpRelay.copyClaudeCode')}
+                                  </HUDButton>
+                                  <HUDButton
+                                    variant="secondary"
+                                    onClick={() => void handleCopyMcpRelayText(mcpRelayStatus?.snippets?.genericJson, 'MCP JSON')}
+                                    disabled={!mcpRelayStatus}
+                                    className="px-3 text-[9px]"
+                                  >
+                                    {t('settings.mcpRelay.copyMcpJson')}
+                                  </HUDButton>
+                                  <HUDButton
+                                    variant="ghost"
+                                    onClick={() => void window.electronAPI?.mcpRelay?.openClaudeConfigFolder?.()}
+                                    disabled={!mcpRelayStatus?.claudeDesktop?.configPath}
+                                    className="col-span-2 px-3 text-[9px]"
+                                  >
+                                    {t('settings.mcpRelay.revealConfig')}
+                                  </HUDButton>
+                                </div>
+                              </div>
+                            </details>
+
+                        </div>
+                    </HUDPanel>
+                </section>
                 
                 {/* Discord Section */}
                 <section>
-                    <HUDSectionTitle number="03">COMMUNICATIONS RELAY</HUDSectionTitle>
-                    <HUDPanel decoration="scanline" variant={discordStatus?.connected ? 'primary' : 'secondary'} title="DISCORD LINK">
+                    <HUDSectionTitle number="04">{t('settings.sections.communications')}</HUDSectionTitle>
+                    <HUDPanel decoration="scanline" variant={discordStatus?.connected ? 'primary' : 'secondary'} title={t('settings.panels.discordLink')} quiet>
                         <div className="space-y-4 pt-2">
                             {discordLoading ? (
                                 <div className="flex items-center gap-3 py-4 opacity-50">
                                     <div className="w-4 h-4 border border-accent-cyan border-t-transparent rounded-full animate-spin" />
-                                    <HUDMicro>ESTABLISHING HANDSHAKE...</HUDMicro>
+                                    <HUDMicro>{t('settings.discord.loading')}</HUDMicro>
                                 </div>
                             ) : discordStatus?.connected ? (
                                 <>
@@ -723,7 +1221,7 @@ function SettingsPage({
                                         </div>
                                         <div>
                                             <div className="font-display text-sm tracking-wide text-white">{discordStatus?.username}</div>
-                                            <HUDMicro className="text-accent-green">SIGNAL: STRONG</HUDMicro>
+                                            <HUDMicro className="text-accent-green">{t('settings.discord.signalStrong')}</HUDMicro>
                                         </div>
                                     </div>
                                     
@@ -733,20 +1231,22 @@ function SettingsPage({
                                             onClick={() => window.open('https://discord.com/oauth2/authorize?client_id=1460412463282524231&scope=bot+applications.commands&permissions=0', '_blank')}
                                             className="text-[10px]"
                                         >
-                                            INVITE BOT
+                                            {t('settings.discord.inviteBot')}
                                         </HUDButton>
                                         <HUDButton variant="danger" onClick={handleDisconnectDiscord} className="text-[10px]">
-                                            TERMINATE
+                                            {t('settings.discord.terminate')}
                                         </HUDButton>
                                     </div>
 
                                     {/* Relay Status */}
                                     {discordRelayStatus && (
                                         <div className="flex items-center justify-between border-t border-white/10 pt-3 mt-1">
-                                            <span className="font-mono text-[10px] text-white/50">RELAY: {discordRelayStatus.state.toUpperCase()}</span>
+                                            <span className="font-mono text-[10px] text-white/50">
+                                              {t('settings.discord.relay', { state: discordRelayStatus.state.toUpperCase() })}
+                                            </span>
                                             {discordRelayStatus.state === 'error' && (
                                                 <button onClick={handleRetryConnection} disabled={retrying} className="text-accent-yellow hover:underline text-[10px] font-mono">
-                                                    {retrying ? 'RETRYING...' : 'RETRY'}
+                                                    {retrying ? t('common.retrying') : t('common.retry')}
                                                 </button>
                                             )}
                                         </div>
@@ -755,7 +1255,7 @@ function SettingsPage({
                             ) : (
                                 <>
                                     <p className="font-mono text-xs text-white/60 leading-relaxed">
-                                        Enable subspace communications to query advisor via Discord overlay.
+                                        {t('settings.discord.description')}
                                     </p>
                                     <HUDButton 
                                         variant="primary" 
@@ -763,14 +1263,14 @@ function SettingsPage({
                                         disabled={discordConnecting}
                                         className="w-full"
                                     >
-                                        {discordConnecting ? 'INITIATING...' : 'CONNECT DISCORD'}
+                                        {discordConnecting ? t('settings.discord.connecting') : t('settings.discord.connect')}
                                     </HUDButton>
                                 </>
                             )}
                             
                             {discordError && (
                                 <p className="text-accent-red text-xs font-mono border-l-2 border-accent-red pl-2">
-                                    ERR: {getUserFriendlyErrorMessage(discordError)}
+                                    {t('settings.discord.errorPrefix')} {getUserFriendlyErrorMessage(discordError, t)}
                                 </p>
                             )}
                         </div>
@@ -779,14 +1279,14 @@ function SettingsPage({
 
                 {/* Feedback Section */}
                 <section>
-                    <HUDSectionTitle number="04">DIAGNOSTICS</HUDSectionTitle>
-                    <div className="flex gap-4 items-center p-4 border border-white/10 bg-white/5 rounded-sm">
+                    <HUDSectionTitle number="05">{t('settings.sections.diagnostics')}</HUDSectionTitle>
+                    <div className="flex gap-4 items-center p-4 border border-white/5 bg-black/15 rounded-sm">
                         <div className="flex-1">
-                             <HUDLabel className="block mb-1">SYSTEM REPORTING</HUDLabel>
-                             <p className="font-mono text-xs text-white/40">Submit detailed logs for analysis.</p>
+                             <HUDLabel className="block mb-1">{t('settings.feedback.label')}</HUDLabel>
+                             <p className="font-mono text-xs text-white/40">{t('settings.feedback.body')}</p>
                         </div>
                         <HUDButton variant="secondary" onClick={onReportIssue}>
-                            REPORT ISSUE
+                            {t('common.reportIssue')}
                         </HUDButton>
                     </div>
                 </section>
@@ -794,20 +1294,20 @@ function SettingsPage({
         </div>
 
         {/* Floating Action Bar */}
-        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50">
-             <div className="bg-black/80 backdrop-blur-md border border-accent-cyan/30 px-6 py-3 rounded-full shadow-[0_0_20px_rgba(0,0,0,0.5)] flex items-center gap-6">
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50">
+             <div className="bg-black/70 backdrop-blur-md border border-white/10 px-4 py-2 rounded-full shadow-[0_0_16px_rgba(0,0,0,0.35)] flex items-center gap-4">
                  <div className="flex items-center gap-2">
                      <div className={`w-2 h-2 rounded-full ${modelRequired ? 'bg-accent-red' : hasChanges ? 'bg-accent-yellow animate-pulse' : 'bg-white/20'}`} />
-                     <HUDMicro>{modelRequired ? 'MODEL REQUIRED' : hasChanges ? 'UNSAVED CHANGES' : 'SYSTEM READY'}</HUDMicro>
+                     <HUDMicro>{modelRequired ? 'MODEL REQUIRED' : hasChanges ? t('settings.actionBar.unsaved') : t('settings.actionBar.ready')}</HUDMicro>
                  </div>
                  <div className="h-4 w-px bg-white/10" />
                  <HUDButton 
                     variant="primary" 
                     onClick={handleSave} 
                     disabled={saving || !hasChanges || modelRequired}
-                    className="min-w-[140px]"
+                    className="min-w-[140px] px-4 py-1.5 text-[10px]"
                  >
-                     {saving ? 'COMMITTING...' : 'APPLY CHANGES'}
+                     {saving ? t('settings.actionBar.committing') : t('settings.actionBar.apply')}
                  </HUDButton>
              </div>
         </div>

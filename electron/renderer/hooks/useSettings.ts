@@ -21,6 +21,24 @@ export const DEFAULT_UI_THEME: UiTheme = 'stellaris-cyan'
 export const CHRONICLE_REFRESH_MODE_VALUES = ['balanced', 'enhanced'] as const
 export type ChronicleRefreshMode = (typeof CHRONICLE_REFRESH_MODE_VALUES)[number]
 export const DEFAULT_CHRONICLE_REFRESH_MODE: ChronicleRefreshMode = 'balanced'
+export const MODEL_ROUTING_MODE_VALUES = ['quality_first', 'conserve'] as const
+export type ModelRoutingMode = (typeof MODEL_ROUTING_MODE_VALUES)[number]
+export const DEFAULT_MODEL_ROUTING_MODE: ModelRoutingMode = 'conserve'
+export const LANGUAGE_VALUES = [
+  'system',
+  'en',
+  'de',
+  'fr',
+  'es',
+  'pt-BR',
+  'ja',
+  'zh-Hans',
+  'en-XA',
+] as const
+export type LanguageSetting = (typeof LANGUAGE_VALUES)[number]
+export type ResolvedLanguage = Exclude<LanguageSetting, 'system'>
+export const DEFAULT_LANGUAGE: LanguageSetting = 'system'
+export const DEFAULT_RESOLVED_LANGUAGE: ResolvedLanguage = 'en'
 
 export function normalizeUiTheme(rawValue: unknown): UiTheme {
   if (typeof rawValue !== 'string') return DEFAULT_UI_THEME
@@ -35,6 +53,33 @@ export function normalizeChronicleRefreshMode(rawValue: unknown): ChronicleRefre
   return (CHRONICLE_REFRESH_MODE_VALUES as readonly string[]).includes(rawValue)
     ? rawValue as ChronicleRefreshMode
     : DEFAULT_CHRONICLE_REFRESH_MODE
+}
+
+export function normalizeModelRoutingMode(rawValue: unknown): ModelRoutingMode {
+  if (typeof rawValue !== 'string') return DEFAULT_MODEL_ROUTING_MODE
+  const normalized = rawValue.replace(/-/g, '_')
+  if (normalized === 'auto' || normalized === 'flash_first') return 'quality_first'
+  if (normalized === 'quota_saver' || normalized === 'lite_first' || normalized === 'flash_lite_first') return 'conserve'
+  return (MODEL_ROUTING_MODE_VALUES as readonly string[]).includes(normalized)
+    ? normalized as ModelRoutingMode
+    : DEFAULT_MODEL_ROUTING_MODE
+}
+
+export function normalizeLanguage(rawValue: unknown): LanguageSetting {
+  if (typeof rawValue !== 'string') return DEFAULT_LANGUAGE
+  const normalized = rawValue.trim()
+  if (normalized === 'pt_BR') return 'pt-BR'
+  if (normalized === 'zh-CN' || normalized === 'zh_CN' || normalized === 'zh-Hans-CN') {
+    return 'zh-Hans'
+  }
+  return (LANGUAGE_VALUES as readonly string[]).includes(normalized)
+    ? normalized as LanguageSetting
+    : DEFAULT_LANGUAGE
+}
+
+export function normalizeResolvedLanguage(rawValue: unknown): ResolvedLanguage {
+  const normalized = normalizeLanguage(rawValue)
+  return normalized === 'system' ? DEFAULT_RESOLVED_LANGUAGE : normalized
 }
 
 export interface Settings {
@@ -56,10 +101,18 @@ export interface Settings {
   saveDir: string
   // Deprecated (backwards-compat with older main process / renderer builds)
   savePath?: string
+  // Multiplayer: pin which empire the advisor analyzes. `playerName` matches the
+  // player's name in the save; `playerCountryId` overrides by country ID. Empty
+  // means "use the first player entry" (single-player behavior).
+  playerName: string
+  playerCountryId: string
   discordEnabled: boolean
   uiScale: number
   uiTheme: UiTheme
   chronicleRefreshMode: ChronicleRefreshMode
+  modelRoutingMode: ModelRoutingMode
+  language: LanguageSetting
+  resolvedLanguage: ResolvedLanguage
 }
 
 export interface UseSettingsResult {
@@ -90,17 +143,25 @@ export function useSettings(): UseSettingsResult {
         uiTheme?: unknown
         llmProvider?: unknown
         chronicleRefreshMode?: unknown
+        modelRoutingMode?: unknown
+        language?: unknown
+        resolvedLanguage?: unknown
       }
       const parsedUiScale = Number(loaded.uiScale)
       const normalized: Settings = {
         ...loaded,
         saveDir: loaded.saveDir || loaded.savePath || '',
+        playerName: loaded.playerName || '',
+        playerCountryId: loaded.playerCountryId ? String(loaded.playerCountryId) : '',
         uiScale: Number.isFinite(parsedUiScale) ? parsedUiScale : 1,
         uiTheme: normalizeUiTheme(loaded.uiTheme),
         chronicleRefreshMode: normalizeChronicleRefreshMode(loaded.chronicleRefreshMode),
         llmProvider: normalizeLLMProvider(loaded.llmProvider),
         llmModel: loaded.llmModel || '',
         llmBaseUrl: loaded.llmBaseUrl || '',
+        modelRoutingMode: normalizeModelRoutingMode(loaded.modelRoutingMode),
+        language: normalizeLanguage(loaded.language),
+        resolvedLanguage: normalizeResolvedLanguage(loaded.resolvedLanguage),
       }
       setSettings(normalized)
       setError(null)

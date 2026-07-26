@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.core.conversation import ConversationManager
 from backend.core.json_utils import json_dumps
+from backend.core.language import build_language_policy, localized_text, normalize_language
 from backend.core.llm_providers import (
     LLMConfig,
     LLMProvider,
@@ -37,12 +38,26 @@ from backend.core.llm_providers import (
     ProviderType,
     get_provider,
 )
+from backend.core.model_routing import (
+    GEMINI_FLASH_MODEL,
+    classify_model_error,
+    display_model_name,
+    fallback_notice,
+    get_model_unavailable_event,
+    is_model_temporarily_unavailable,
+    mark_model_failure,
+    normalize_model_routing_mode,
+    route_event_payload,
+    route_models_for,
+)
 from backend.core.utils import compute_save_hash_from_briefing
 from stellaris_companion.personality import build_optimized_prompt
 from stellaris_save_extractor import SaveExtractor
 
 # Configure dedicated logger for companion performance metrics
 logger = logging.getLogger("stellaris.companion")
+
+DEFAULT_ADVISOR_MODEL = GEMINI_FLASH_MODEL
 
 
 # Fallback system prompt (used if personality generation fails)
@@ -82,7 +97,9 @@ class Companion:
         api_key: str | None = None,
         *,
         auto_precompute: bool = True,
+        advisor_model: str = DEFAULT_ADVISOR_MODEL,
         llm_config: LLMConfig | None = None,
+        model_routing_mode: str | None = None,
     ):
         """Initialize the companion.
 
@@ -124,6 +141,12 @@ class Companion:
         self._provider: LLMProvider = get_provider(self._llm_config)
         self._thinking_level = "dynamic"
         self._auto_precompute = bool(auto_precompute)
+        self.advisor_model = (
+            str(advisor_model or DEFAULT_ADVISOR_MODEL).strip() or DEFAULT_ADVISOR_MODEL
+        )
+        self.model_routing_mode = normalize_model_routing_mode(
+            model_routing_mode or os.environ.get("STELLARIS_MODEL_ROUTING_MODE")
+        )
 
         # Legacy compatibility: expose api_key for code that might reference it
         self.api_key = self._llm_config.api_key
@@ -145,6 +168,9 @@ class Companion:
             "wall_time_ms": 0.0,
             "response_length": 0,
             "payload_sizes": {},
+            "model": self.advisor_model,
+            "model_display": display_model_name(self.advisor_model),
+            "routing": None,
         }
 
         # Save state tracking
@@ -402,6 +428,10 @@ class Companion:
                 - payload_sizes: dict mapping tool names to response sizes in bytes
         """
         return self._last_call_stats.copy()
+
+    def get_advisor_model(self) -> str:
+        """Return the default advisor model for chat requests."""
+        return self.advisor_model
 
     def get_precompute_status(self) -> dict[str, Any]:
         """Get current Phase 4 precompute cache status (safe for UI display)."""
@@ -664,7 +694,7 @@ class Companion:
             cleaned = cleaned[:limit].rstrip() + "..."
         return cleaned
 
-    def _load_save_memory_summary(self, *, save_id: str | None) -> str | None:
+    def _load_save_memory_summary(self, *, save_id: str | None, language: str = "en") -> str | None:
         """Load persisted save-scoped memory summary (best effort)."""
         if not save_id:
             return None
@@ -672,7 +702,7 @@ class Companion:
             from backend.core.database import get_default_db
 
             db = get_default_db()
-            summary = db.get_advisor_memory_summary(save_id)
+            summary = db.get_advisor_memory_summary(save_id, language=language)
             if not summary:
                 return None
             return summary[: self._max_save_memory_chars]
@@ -686,6 +716,7 @@ class Companion:
         question: str,
         answer: str,
         game_date: str | None,
+        language: str = "en",
     ) -> None:
         """Append a compact memory entry and persist per-save summary."""
         if not save_id:
@@ -700,7 +731,7 @@ class Companion:
             from backend.core.database import get_default_db
 
             db = get_default_db()
-            existing = db.get_advisor_memory_summary(save_id) or ""
+            existing = db.get_advisor_memory_summary(save_id, language=language) or ""
             lines = [ln.strip() for ln in existing.splitlines() if ln.strip()]
 
             # Keep recent continuity, then append current turn.
@@ -714,6 +745,7 @@ class Companion:
 
             db.upsert_advisor_memory_summary(
                 save_id=save_id,
+                language=language,
                 summary_text="\n".join(lines),
                 last_game_date=game_date,
             )
@@ -938,9 +970,16 @@ class Companion:
         session_key: str,
         save_id: str | None = None,
         history_context: str | None = None,
+        model_name: str | None = None,
+        model_routing_mode: str | None = None,
+        language: str | None = None,
     ) -> tuple[str, float]:
         """Ask a question using the fully precomputed briefing (no tools)."""
         start_time = time.time()
+        output_language = normalize_language(language)
+        language_scoped_session_key = f"{session_key}:lang:{output_language}"
+        explicit_model = str(model_name).strip() if model_name else None
+        selected_model = explicit_model or self.advisor_model or DEFAULT_ADVISOR_MODEL
 
         cleaned_question = (question or "").strip()
         if len(cleaned_question) > self._max_prompt_question_chars:
@@ -949,15 +988,21 @@ class Companion:
         briefing_json, game_date, data_note = self._get_best_briefing_json()
         if not briefing_json:
             return (
-                "No precomputed game state is available yet. Please wait for a save to be processed.",
+                localized_text("no_precomputed_state", output_language),
                 0.0,
             )
 
-        save_memory_summary = self._load_save_memory_summary(save_id=save_id)
+        if data_note:
+            data_note = localized_text("loaded_from_cache", output_language)
+
+        save_memory_summary = self._load_save_memory_summary(
+            save_id=save_id,
+            language=output_language,
+        )
 
         # Build prompt with sliding-window history (Phase 4)
         user_prompt = self._conversations.build_prompt(
-            session_key=session_key,
+            session_key=language_scoped_session_key,
             briefing_json=briefing_json,
             game_date=game_date,
             question=cleaned_question,
@@ -968,11 +1013,12 @@ class Companion:
 
         ask_system_prompt = (
             f"{self.system_prompt}\n\n"
+            f"{build_language_policy(output_language)}\n\n"
             "ASK MODE (NO TOOLS):\n"
             "- You are given the complete current game state as JSON in the user message.\n"
             "- Do NOT call tools or ask to call tools.\n"
             "- ALL numbers and factual claims must come from the JSON.\n"
-            "- If a value is missing, say 'unknown' and suggest what to check in-game.\n"
+            "- If a value is missing, say so in the requested language and suggest what to check in-game.\n"
             "- Be a strategic ADVISOR: interpret, prioritize, and recommend next actions.\n"
         )
         naval_cap_policy_block = self._build_naval_capacity_policy_block(
@@ -983,13 +1029,77 @@ class Companion:
             ask_system_prompt += f"{naval_cap_policy_block}\n"
 
         try:
-            response = self._provider.generate(
-                prompt=user_prompt,
-                system_prompt=ask_system_prompt,
-                temperature=1.0,
-                max_tokens=4096,
+            candidate_models = route_models_for(
+                mode=model_routing_mode or self.model_routing_mode,
+                purpose="advisor",
+                explicit_model=explicit_model,
             )
-            response_text_raw = response.text or "Could not generate a response."
+            if not candidate_models:
+                candidate_models = [selected_model]
+
+            requested_model = candidate_models[0]
+            response = None
+            final_model = requested_model
+            route_event = None
+            last_error: Exception | None = None
+
+            original_model = self._provider.config.model
+            try:
+                for index, candidate_model in enumerate(candidate_models):
+                    fallback_model = (
+                        candidate_models[index + 1] if index + 1 < len(candidate_models) else None
+                    )
+                    if fallback_model and is_model_temporarily_unavailable(candidate_model):
+                        route_event = get_model_unavailable_event(
+                            requested_model=requested_model,
+                            skipped_model=candidate_model,
+                            final_model=fallback_model,
+                        )
+                        continue
+
+                    try:
+                        self._provider.config.model = candidate_model
+                        response = self._provider.generate(
+                            prompt=user_prompt,
+                            system_prompt=ask_system_prompt,
+                            temperature=1.0,
+                            max_tokens=4096,
+                        )
+                        final_model = candidate_model
+                        if route_event and route_event.final_model != final_model:
+                            route_event.final_model = final_model
+                        break
+                    except Exception as exc:
+                        last_error = exc
+                        failure = classify_model_error(exc)
+                        if failure and fallback_model:
+                            mark_model_failure(candidate_model, failure)
+                            route_event = route_event or get_model_unavailable_event(
+                                requested_model=requested_model,
+                                skipped_model=candidate_model,
+                                final_model=fallback_model,
+                            )
+                            if route_event:
+                                route_event.reason = failure.reason
+                                route_event.error = failure.message[:500]
+                                route_event.notice = fallback_notice(
+                                    candidate_model,
+                                    fallback_model,
+                                    reason=failure.reason,
+                                )
+                            continue
+                        raise
+            finally:
+                self._provider.config.model = original_model
+
+            if response is None:
+                if last_error is not None:
+                    raise last_error
+                raise RuntimeError("No advisor model was available")
+
+            response_text_raw = response.text or localized_text(
+                "could_not_generate", output_language
+            )
             response_text = response_text_raw
 
             # Deterministic disclaimer on stale/cache fallback.
@@ -1009,10 +1119,15 @@ class Companion:
                     "prompt_total": len(user_prompt),
                     "save_memory_summary": len(save_memory_summary or ""),
                 },
+                "model": final_model,
+                "model_display": display_model_name(final_model),
+                "requested_model": requested_model,
+                "requested_model_display": display_model_name(requested_model),
+                "routing": route_event_payload(route_event),
             }
 
             self._conversations.record_turn(
-                session_key=session_key,
+                session_key=language_scoped_session_key,
                 question=cleaned_question,
                 answer=response_text,
                 game_date=game_date,
@@ -1022,6 +1137,7 @@ class Companion:
                 question=cleaned_question,
                 answer=response_text_raw,
                 game_date=game_date,
+                language=output_language,
             )
 
             return response_text, elapsed
@@ -1036,6 +1152,9 @@ class Companion:
                 "response_length": 0,
                 "payload_sizes": {"briefing_json": len(briefing_json)},
                 "error": str(e),
+                "model": selected_model,
+                "model_display": display_model_name(selected_model),
+                "routing": None,
             }
             return f"Error: {str(e)}", elapsed
 
@@ -1053,7 +1172,7 @@ class Companion:
         diplomacy = self.extractor.get_diplomacy()
 
         return {
-            "empire_name": self.metadata.get("name", "Unknown"),
+            "empire_name": player.get("empire_name") or self.metadata.get("name", "Unknown"),
             "date": self.metadata.get("date", "Unknown"),
             "military_power": player.get("military_power", 0),
             "fleet_count": player.get("fleet_count", 0),

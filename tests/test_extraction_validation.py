@@ -153,5 +153,90 @@ class TestExtractionValidator:
         assert report["overall_valid"] == all_valid
 
 
+class _FleetValidatorExtractorDouble:
+    def __init__(self):
+        self._raw_fleets = {
+            # In 4.3 the legacy station marker can coexist with the authoritative
+            # mobile military ship class; the validator must follow ship_class.
+            "745": {
+                "ship_class": "shipclass_military",
+                "station": "yes",
+                "military_power": "500",
+            },
+            "798": {
+                "ship_class": "shipclass_starbase",
+                "military_power": "300",
+            },
+        }
+
+    def get_fleets(self):
+        return {
+            "military_fleet_count": 1,
+            "civilian_fleet_count": 0,
+            "starbases": {"total": 1},
+            "fleets": [
+                {
+                    "id": "745",
+                    "name": "1st Fleet",
+                    "military_power": 500,
+                }
+            ],
+        }
+
+    def get_player_empire_id(self):
+        return 0
+
+    def _find_player_country_content(self, _player_id):
+        return "owned_fleets={ fleet=745 fleet=798 }"
+
+    def _get_owned_fleet_ids(self, _country_content):
+        return ["745", "798"]
+
+    def _get_fleets_cached(self):
+        return self._raw_fleets
+
+
+def test_fleet_validator_uses_ship_class_before_legacy_station_marker():
+    validator = object.__new__(ExtractionValidator)
+    validator.extractor = _FleetValidatorExtractorDouble()
+    validator.raw = "\nfleet=\n{\n\t745=\n\t{\n\t}\n\t798=\n\t{\n\t}\n}"
+    validator._country_names_cache = None
+
+    result = validator.validate_fleets()
+
+    assert result.valid is True
+    assert result.issues == []
+    assert not any(warning["check"] == "count_mismatch" for warning in result.warnings)
+
+
+class _MachineResourceValidatorExtractorDouble:
+    def get_resources(self):
+        values = {"energy": 100.0, "minerals": 50.0, "alloys": 25.0}
+        return {
+            "stockpiles": values,
+            "monthly_income": {},
+            "monthly_expenses": {},
+            "net_monthly": values,
+        }
+
+    def get_empire_identity(self):
+        return {"is_machine": True, "is_hive_mind": False}
+
+
+def test_resource_validator_does_not_require_food_or_consumer_goods_for_machines():
+    validator = object.__new__(ExtractionValidator)
+    validator.extractor = _MachineResourceValidatorExtractorDouble()
+
+    result = validator.validate_resources()
+
+    missing = {
+        warning.get("details", {}).get("resource")
+        for warning in result.warnings
+        if warning["check"] == "missing_essential"
+    }
+    assert "food" not in missing
+    assert "consumer_goods" not in missing
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

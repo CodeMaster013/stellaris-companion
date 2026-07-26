@@ -187,8 +187,10 @@ class EconomyMixin:
             "unemployed_pops": 0,
         }
 
-        # Step 1: Get player's planet IDs (as set of strings for comparison)
-        planet_ids = self._get_player_planet_ids()
+        # Step 1: Get the player's colony IDs. Pops reference colonies by the
+        # country's own colony id space (owned_planets/controlled_colonies),
+        # which differs from the planets.planet section keys in 4.x saves.
+        planet_ids = self._get_player_colony_ids()
         if not planet_ids:
             return result
 

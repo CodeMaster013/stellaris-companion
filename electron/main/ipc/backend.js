@@ -1,6 +1,11 @@
-function registerBackendIpcHandlers({ ipcMain, validateSender, callBackendApiEnvelope }) {
+function registerBackendIpcHandlers({ ipcMain, validateSender, callBackendApiEnvelope, getResolvedLanguage }) {
   // IPC Handlers - Backend Proxy (requires ELEC-005 for full implementation)
   // Basic handlers for backend proxy
+
+  const withLanguage = (body = {}) => ({
+    ...body,
+    language: typeof getResolvedLanguage === 'function' ? getResolvedLanguage() : 'en',
+  })
 
   ipcMain.handle('backend:health', async (event) => {
     try { validateSender(event) } catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'IPC error', code: 'IPC_SENDER_INVALID' } }
@@ -12,11 +17,16 @@ function registerBackendIpcHandlers({ ipcMain, validateSender, callBackendApiEnv
     return await callBackendApiEnvelope('/api/diagnostics')
   })
 
-  ipcMain.handle('backend:chat', async (event, { message, session_key }) => {
+  ipcMain.handle('backend:chat', async (event, { message, session_key, model, model_routing_mode }) => {
     try { validateSender(event) } catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'IPC error', code: 'IPC_SENDER_INVALID' } }
     return await callBackendApiEnvelope('/api/chat', {
       method: 'POST',
-      body: JSON.stringify({ message, session_key }),
+      body: JSON.stringify(withLanguage({
+        message,
+        session_key,
+        model: model || null,
+        model_routing_mode: model_routing_mode || null,
+      })),
     })
   })
 
@@ -39,32 +49,43 @@ function registerBackendIpcHandlers({ ipcMain, validateSender, callBackendApiEnv
     return await callBackendApiEnvelope(url)
   })
 
-  ipcMain.handle('backend:recap', async (event, { session_id, style }) => {
+  ipcMain.handle('backend:recap', async (event, { session_id, style, model_routing_mode }) => {
     try { validateSender(event) } catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'IPC error', code: 'IPC_SENDER_INVALID' } }
     return await callBackendApiEnvelope('/api/recap', {
       method: 'POST',
-      body: JSON.stringify({ session_id, style: style || 'summary' }),
+      body: JSON.stringify(withLanguage({
+        session_id,
+        style: style || 'summary',
+        model_routing_mode: model_routing_mode || null,
+      })),
     })
   })
 
-  ipcMain.handle('backend:chronicle', async (event, { session_id, force_refresh, chapter_only, refresh_mode }) => {
+  ipcMain.handle('backend:chronicle', async (event, { session_id, force_refresh, chapter_only, refresh_mode, model_routing_mode }) => {
     try { validateSender(event) } catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'IPC error', code: 'IPC_SENDER_INVALID' } }
     return await callBackendApiEnvelope('/api/chronicle', {
       method: 'POST',
-      body: JSON.stringify({
+      body: JSON.stringify(withLanguage({
         session_id,
         force_refresh: force_refresh || false,
         chapter_only: chapter_only || false,
         refresh_mode: refresh_mode || 'balanced',
-      }),
+        model_routing_mode: model_routing_mode || null,
+      })),
     })
   })
 
-  ipcMain.handle('backend:regenerate-chapter', async (event, { session_id, chapter_number, confirm, regeneration_instructions }) => {
+  ipcMain.handle('backend:regenerate-chapter', async (event, { session_id, chapter_number, confirm, regeneration_instructions, model_routing_mode }) => {
     try { validateSender(event) } catch (e) { return { ok: false, error: e instanceof Error ? e.message : 'IPC error', code: 'IPC_SENDER_INVALID' } }
     return await callBackendApiEnvelope('/api/chronicle/regenerate-chapter', {
       method: 'POST',
-      body: JSON.stringify({ session_id, chapter_number, confirm: confirm || false, regeneration_instructions: regeneration_instructions || null }),
+      body: JSON.stringify(withLanguage({
+        session_id,
+        chapter_number,
+        confirm: confirm || false,
+        regeneration_instructions: regeneration_instructions || null,
+        model_routing_mode: model_routing_mode || null,
+      })),
     })
   })
 

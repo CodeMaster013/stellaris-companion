@@ -14,16 +14,27 @@ cd "$PROJECT_ROOT"
 
 echo "Building Python backend..."
 
+if [ -n "${PYTHON_BIN:-}" ]; then
+    :
+elif command -v python3 &> /dev/null; then
+    PYTHON_BIN=python3
+elif command -v python &> /dev/null; then
+    PYTHON_BIN=python
+else
+    echo "Error: Python not found"
+    exit 1
+fi
+
 # Check for virtual environment
 if [ -d "venv" ]; then
     echo "Activating virtual environment..."
     source venv/bin/activate
 fi
 
-# Check if PyInstaller is installed
-if ! command -v pyinstaller &> /dev/null; then
+# Check if PyInstaller is installed in the selected Python environment.
+if ! "$PYTHON_BIN" -m PyInstaller --version &> /dev/null; then
     echo "PyInstaller not found. Installing..."
-    pip install pyinstaller
+    "$PYTHON_BIN" -m pip install pyinstaller
 fi
 
 # Clean previous build artifacts
@@ -31,16 +42,20 @@ echo "Cleaning previous build..."
 rm -rf build/stellaris-backend
 rm -rf dist/stellaris-backend
 rm -rf dist-python
+find backend stellaris_companion stellaris_save_extractor -type d -name __pycache__ -prune -exec rm -rf {} +
+find backend stellaris_companion stellaris_save_extractor -type f -name '*.pyc' -delete
 
 # Run PyInstaller with the spec file
 echo "Running PyInstaller..."
-pyinstaller --clean stellaris-backend.spec
+"$PYTHON_BIN" -m PyInstaller --clean stellaris-backend.spec
 
 # Move output to dist-python (expected by electron-builder)
 echo "Moving output to dist-python..."
 mkdir -p dist-python
 if [ -d "dist/stellaris-backend" ]; then
     mv dist/stellaris-backend dist-python/
+    echo "Writing backend build metadata..."
+    "$PYTHON_BIN" scripts/backend_build_info.py stamp dist-python/stellaris-backend
     echo "Built: dist-python/stellaris-backend/"
 else
     echo "Error: Build output not found"
