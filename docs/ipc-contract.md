@@ -47,8 +47,12 @@ Example (backend):
 
 ```py
 raise HTTPException(
-  status_code=409,
-  detail={"error": "Chronicle generation already in progress", "code": "CHRONICLE_IN_PROGRESS", "retry_after_ms": 2000},
+    status_code=409,
+    detail={
+        "error": "Chronicle generation already in progress",
+        "code": "CHRONICLE_IN_PROGRESS",
+        "retry_after_ms": 2000,
+    },
 )
 ```
 

@@ -1339,20 +1339,24 @@ class TestCurrentEraFallbackModel:
 
     def test_falls_back_to_flash_lite_for_current_era(self, generator):
         """Current-era generation should route via Flash-Lite after Flash quota failure."""
-        mock_client = MagicMock()
-        mock_client.models.generate_content.side_effect = [
+        mock_provider = MagicMock()
+        mock_provider.config.model = "gemini-3-flash-preview"
+        from backend.core.llm_providers import LLMResponse
+
+        mock_provider.generate_structured.side_effect = [
             RuntimeError("quota"),
-            MagicMock(
+            LLMResponse(
                 text=json.dumps(
                     {
                         "sections": [
                             {"type": "prose", "text": "The frontier trembles.", "attribution": ""}
                         ]
                     }
-                )
+                ),
+                model="gemini-3.1-flash-lite-preview",
             ),
         ]
-        generator._client = mock_client  # type: ignore[attr-defined]
+        generator._provider = mock_provider  # type: ignore[attr-defined]
 
         result = generator._generate_current_era(  # type: ignore[attr-defined]
             save_id="save-1",
@@ -1368,11 +1372,7 @@ class TestCurrentEraFallbackModel:
 
         assert result is not None
         assert "The frontier trembles." in result["narrative"]
-        assert mock_client.models.generate_content.call_count == 2
-        first_call = mock_client.models.generate_content.call_args_list[0]
-        second_call = mock_client.models.generate_content.call_args_list[1]
-        assert first_call.kwargs["model"] == "gemini-3-flash-preview"
-        assert second_call.kwargs["model"] == "gemini-3.1-flash-lite-preview"
+        assert mock_provider.generate_structured.call_count == 2
         assert generator._model_routing_response()["fallback"] is True  # type: ignore[attr-defined]
 
 

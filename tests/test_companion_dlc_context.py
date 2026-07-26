@@ -396,7 +396,9 @@ def test_ask_precomputed_routes_to_flash_lite_when_flash_hits_quota(companion):
                 "'GenerateRequestsPerMinutePerProjectPerModel-FreeTier', quotaValue': '5'. "
                 "Please retry in 42s"
             )
-        return LLMResponse(text="Gemini Flash-Lite answered after Flash hit quota.", model=self.config.model)
+        return LLMResponse(
+            text="Gemini Flash-Lite answered after Flash hit quota.", model=self.config.model
+        )
 
     companion._provider.generate = _fake_generate.__get__(companion._provider)
 
