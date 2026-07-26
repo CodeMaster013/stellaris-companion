@@ -6,8 +6,6 @@ Tests cover:
 - LLMConfig.from_env() with provider-specific fallbacks
 """
 
-import os
-
 import pytest
 
 from backend.core.llm_providers import LLMConfig, ProviderType

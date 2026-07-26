@@ -3,8 +3,6 @@
 import json
 import os
 import sys
-from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -12,7 +10,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.core.companion import Companion
-from backend.core.llm_providers import LLMConfig, LLMResponse, ProviderType
+from backend.core.llm_providers import LLMConfig, LLMResponse
 from backend.core.model_routing import (
     GEMINI_FLASH_LITE_MODEL,
     GEMINI_FLASH_MODEL,

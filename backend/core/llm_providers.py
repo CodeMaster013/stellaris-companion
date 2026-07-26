@@ -30,7 +30,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class ProviderType(str, Enum):
     OLLAMA = "ollama"
 
     @classmethod
-    def _missing_(cls, value: object) -> "ProviderType | None":
+    def _missing_(cls, value: object) -> ProviderType | None:
         """Allow common alias values used by the UI / environment configuration.
 
         Examples:
@@ -70,7 +70,7 @@ class ProviderType(str, Enum):
         return aliases.get(normalized)
 
     @classmethod
-    def requires_api_key(cls, provider: "ProviderType") -> bool:
+    def requires_api_key(cls, provider: ProviderType) -> bool:
         """Check if a provider requires an API key."""
         return provider in {cls.GOOGLE_GEMINI, cls.OPENAI, cls.ANTHROPIC}
 
@@ -112,7 +112,7 @@ class LLMConfig:
         return defaults.get(provider, "default")
 
     @classmethod
-    def from_env(cls) -> "LLMConfig":
+    def from_env(cls) -> LLMConfig:
         """Create config from environment variables.
 
         Environment variables:
