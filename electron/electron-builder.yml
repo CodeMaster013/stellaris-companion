@@ -74,7 +74,7 @@ nsis:
 
 publish:
   provider: github
-  owner: gitmaan
+  owner: CodeMaster013
   repo: stellaris-companion
   releaseType: release
 
