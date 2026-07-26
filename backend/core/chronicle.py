@@ -992,22 +992,28 @@ class ChronicleGenerator:
                 continue
 
             try:
-                gemini_config: dict[str, Any] = {
-                    "temperature": config.get("temperature", 1.0),
-                    "max_output_tokens": config.get("max_output_tokens", 4096),
-                }
-                if "response_mime_type" in config:
-                    gemini_config["response_mime_type"] = config["response_mime_type"]
-                if "response_schema" in config:
-                    gemini_config["response_schema"] = config["response_schema"]
+                temperature = config.get("temperature", 1.0)
+                max_tokens = config.get("max_output_tokens", 4096)
+                response_schema = config.get("response_schema")
 
-                from google.genai import types
-
-                response = self.provider.client.models.generate_content(
-                    model=candidate_model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**gemini_config),
-                )
+                original_model = self.provider.config.model
+                self.provider.config.model = candidate_model
+                try:
+                    if response_schema:
+                        response = self.provider.generate_structured(
+                            prompt=contents,
+                            schema=response_schema,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    else:
+                        response = self.provider.generate(
+                            prompt=contents,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                finally:
+                    self.provider.config.model = original_model
                 final_event = route_event or (
                     None
                     if candidate_model == requested_model
